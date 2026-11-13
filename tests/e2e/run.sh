@@ -42,7 +42,8 @@ https://:443 {
 	respond "host={host} xff={header.X-Forwarded-For} xfp={header.X-Forwarded-Proto} uri={uri}" 200
 }
 EOF
-chmod -R a+r "$WORK"
+# Sous Linux, le conteneur WAF tourne en uid 10001 : le dossier de test doit lui être traversable.
+chmod -R a+rX "$WORK"
 
 docker network create "$NET" >/dev/null
 docker run -d --name "$NET-origin" --network "$NET" --network-alias "$ORIGIN_HOST" --user root \
