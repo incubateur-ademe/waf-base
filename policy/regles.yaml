@@ -1,0 +1,18 @@
+# Règles de la CRS et du socle, lues par wafgen check et run.
+# Seules les règles excluables peuvent être retirées ou perdre une cible.
+excluables:
+  - [920000, 944999]
+famille_max: 1000
+protegees:
+  - [1, 19999]
+  - [200000, 200099]
+  - [901000, 901999]
+  - [905000, 905999]
+  - [911100, 911100]
+  - [949000, 949999]
+  - [959000, 959999]
+  - [980000, 980999]
+  - [999000, 999999]
+ids_tenant: [30000, 39999]
+tags_retirables: [OWASP_CRS]
+prefixes_tags_retirables: [attack-]

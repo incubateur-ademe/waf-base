@@ -1,0 +1,38 @@
+{
+	admin off
+	persist_config off
+	auto_https off
+	http_port 8080
+	grace_period 10s
+	metrics {
+		per_host
+	}
+	servers :8080 {
+		trusted_proxies static private_ranges
+		trusted_proxies_strict
+	}
+}
+
+# Santé et métriques. Aucune route Traefik vers ce port.
+http://:2020 {
+	metrics /metrics
+	handle /mode {
+		root * /var/lib/waf
+		rewrite * /mode.prom
+		file_server
+	}
+	@ready {
+		path /healthz
+		file {
+			root /var/lib/waf
+			try_files /ready
+		}
+	}
+	respond @ready 200
+	respond /healthz 503
+}
+
+# Les sites de l'app sont ajoutés en tête de ce serveur par wafgen run, en JSON.
+http://:8080 {
+	respond 421
+}

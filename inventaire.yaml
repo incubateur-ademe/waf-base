@@ -1,0 +1,16 @@
+# Apps protégées, modifiable par ops seulement (CODEOWNERS). Section 5.7 du design.
+defaults:
+  ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
+  host_header: visitor
+  branch: main
+  resources: { memory: 512M, cpu_weight: 64 }
+  waf_dir: waf
+  internal_events: 0
+apps:
+  tacct:
+    repo: incubateur-ademe/tacct
+    platform: scalingo
+    hosts: [tacct.ademe.fr, www.tacct.ademe.fr, facili-tacct.beta.gouv.fr, www.facili-tacct.beta.gouv.fr]
+    host_header: upstream
+    crs_plugins: []
+    live: false

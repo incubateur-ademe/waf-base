@@ -1,0 +1,55 @@
+# Bornes des formes SecLang admises dans waf/coraza/ (section 6 du design).
+config:
+  blocking_paranoia_level: [1, 3]
+  detection_paranoia_level_max: 4
+  inbound_anomaly_score_threshold: [2, 5]
+  allowed_methods: [GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]
+exclusions:
+  # Une famille (mille IDs) retirée sous trois conditions de chemin au plus.
+  chemins_max_par_famille: 3
+  # Familles retirées en entier (ruleRemoveById) qu'une même requête peut cumuler,
+  # toutes conditions qui la couvrent confondues.
+  familles_max_par_chemin: 2
+  collections: [ARGS, ARGS_GET, ARGS_POST, ARGS_NAMES, REQUEST_COOKIES, REQUEST_COOKIES_NAMES, REQUEST_HEADERS]
+  regex_litteraux_min: 4
+  types_de_contenu:
+    - application/x-www-form-urlencoded
+    - multipart/form-data
+    - text/xml
+    - application/xml
+    - application/soap+xml
+    - application/json
+    - text/plain
+    - application/csp-report
+    - application/reports+json
+    - application/x-ndjson
+  methodes_chain: [GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE]
+rate_limit:
+  # Borne de wafgen check ; wafgen run applique le plafond de l'app (WAF_CEILINGS).
+  plafond_max_par_seconde: 1000
+durcissement:
+  operateurs: [rx, streq, beginsWith, endsWith, contains, pm, within, ipMatch, eq, gt, lt, ge, le]
+  variables:
+    - ARGS
+    - ARGS_GET
+    - ARGS_POST
+    - ARGS_NAMES
+    - ARGS_GET_NAMES
+    - ARGS_POST_NAMES
+    - FILES
+    - FILES_NAMES
+    - QUERY_STRING
+    - REMOTE_ADDR
+    - REQUEST_BASENAME
+    - REQUEST_BODY
+    - REQUEST_COOKIES
+    - REQUEST_COOKIES_NAMES
+    - REQUEST_FILENAME
+    - REQUEST_HEADERS
+    - REQUEST_HEADERS_NAMES
+    - REQUEST_LINE
+    - REQUEST_METHOD
+    - REQUEST_PROTOCOL
+    - REQUEST_URI
+    - REQUEST_URI_RAW
+  statuts: [403, 404, 405]

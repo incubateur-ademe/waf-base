@@ -1,0 +1,18 @@
+name: keepalive
+on:
+  schedule:
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+permissions:
+  actions: write
+jobs:
+  enable:
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for id in $(gh api "repos/$REPO/actions/workflows" --jq '.workflows[] | select(.path | test("crs-nightly|keepalive")) | .id'); do
+            gh api -X PUT "repos/$REPO/actions/workflows/$id/enable"
+          done
