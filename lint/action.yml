@@ -1,20 +1,19 @@
 name: waf-lint
-description: Construit le dossier waf/ d'une app avec l'image de base, ce qui rejoue wafgen check (formes, rendu, caddy validate, attaque canonique).
+description: Construit l'image de base depuis le source de waf-base au SHA de l'action, puis le dossier waf/ d'une app, ce qui rejoue wafgen check (formes, rendu, caddy validate, attaque canonique).
 inputs:
   waf-dir:
     description: Dossier des règles de l'app
     default: waf
-  waf-base:
-    description: Image de base ; Coolify utilise un digest, le lint suit le tag de la version majeure
-    default: ghcr.io/incubateur-ademe/waf-base:v1
 runs:
   using: composite
   steps:
+    # Le paquet GHCR est privé : la base est reconstruite depuis le dépôt de l'action,
+    # que le runner a déjà téléchargé au SHA épinglé par la startup.
     - shell: bash
       env:
         WAF_DIR: ${{ inputs.waf-dir }}
-        WAF_BASE: ${{ inputs.waf-base }}
+        BASE_DIR: ${{ github.action_path }}/..
       run: |
         if ! printf '%s' "$WAF_DIR" | grep -Eqx 'waf(/[a-z0-9-]{1,64})?'; then echo "waf-dir invalide"; exit 1; fi
-        docker pull --quiet "$WAF_BASE"
-        docker build --build-arg WAF_BASE="$WAF_BASE" --no-cache --progress plain "$WAF_DIR"
+        docker build --quiet -t waf-base:lint "$BASE_DIR"
+        docker build --build-arg WAF_BASE=waf-base:lint --no-cache --progress plain "$WAF_DIR"

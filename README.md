@@ -1,6 +1,6 @@
 # waf-base
 
-Image de base du WAF Caddy + Coraza des apps de l'incubateur ADEME, publiée sur `ghcr.io/incubateur-ademe/waf-base`.
+Image de base du WAF Caddy + Coraza des apps de l'incubateur ADEME, publiée sur `ghcr.io/incubateur-ademe/waf-base`, paquet privé : les serveurs la tirent avec un PAT classic `read:packages`, et tout autre usage la reconstruit depuis ce dépôt public.
 Le design est dans le dossier finops (`waf-coraza-design.md`, sections 5 à 8).
 
 ## Contenu
@@ -23,10 +23,11 @@ ARG WAF_BASE
 FROM ${WAF_BASE}
 ```
 
-Build local :
+Build local, sans accès au paquet privé :
 
 ```sh
-docker build --build-arg WAF_BASE=ghcr.io/incubateur-ademe/waf-base:v1 waf/
+docker build -t waf-base:local https://github.com/incubateur-ademe/waf-base.git#main
+docker build --build-arg WAF_BASE=waf-base:local waf/
 ```
 
 ## Développement
