@@ -14,3 +14,10 @@ apps:
     host_header: upstream
     crs_plugins: []
     live: false
+  waf-pilote:
+    repo: incubateur-ademe/waf-pilote
+    platform: scalingo
+    hosts: [waf-pilote.incubateur.ademe.dev]
+    host_header: visitor
+    crs_plugins: []
+    live: true
