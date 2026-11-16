@@ -31,6 +31,16 @@ jobs:
           persist-credentials: false
       - run: docker build -t waf-base:ci .
       - run: tests/e2e/run.sh waf-base:ci
+      - run: docker build -f ops/Dockerfile -t waf-ops:ci .
+      - name: wafgen provision sans variables sort en erreur, sans réseau
+        run: |
+          set +e
+          out="$(docker run --rm --network none waf-ops:ci 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          test "$rc" -ne 0
+          grep -q "variables manquantes : COOLIFY_URL, COOLIFY_TOKEN" <<<"$out"
   workflows:
     runs-on: ubuntu-24.04
     steps:
