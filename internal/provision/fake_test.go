@@ -3,6 +3,7 @@ package provision
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -13,7 +14,10 @@ import (
 
 // fakeCoolify reproduit le comportement de l'API Coolify 4.7.5 lu dans son code :
 // variables en is_buildtime=true par défaut, copie preview créée avec chaque
-// variable, chaîne vide convertie en null, réglages d'app rangés sous settings.
+// variable, chaîne vide convertie en null, réglages d'app rangés sous settings,
+// suppression de variable refusée (le jeton SecOps n'a pas l'ability delete).
+// Une variable d'équipe vide n'entre que par la vue développeur de l'UI : POST
+// /team/envs la refuse en HTTP 500 (colonne value NOT NULL).
 type fakeCoolify struct {
 	t     *testing.T
 	token string
@@ -49,10 +53,15 @@ type fakeEnv struct {
 	Buildtime, Runtime, Preview bool
 }
 
+// fakeShared : Locked est une variable verrouillée (is_shown_once), Hidden une
+// valeur que le jeton ne lit pas (sans read:sensitive). Dans les deux cas le GET
+// omet value.
 type fakeShared struct {
-	ID    int
-	Key   string
-	Value *string
+	ID     int
+	Key    string
+	Value  *string
+	Locked bool
+	Hidden bool
 }
 
 const ghAppUUID = "gh-ops"
@@ -73,6 +82,13 @@ func newFake(t *testing.T, token string) (*fakeCoolify, *httptest.Server) {
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		for _, w := range f.writes {
+			if strings.HasPrefix(w, "POST /api/v1/team/envs") || strings.Contains(w, "/team/envs/") {
+				t.Errorf("écriture d'une variable d'équipe : %s", w)
+			}
+		}
+	})
 	return f, srv
 }
 
@@ -173,9 +189,14 @@ func (a *fakeApp) setEnv(f *fakeCoolify, key string, value *string, buildtime, r
 	)
 }
 
-func (f *fakeCoolify) addShared(key string, value *string) {
+func (f *fakeCoolify) addShared(key string, value *string) *fakeShared {
+	if value == nil {
+		f.t.Fatalf("variable d'équipe %s sans valeur", key)
+	}
 	f.nextID++
-	f.team = append(f.team, &fakeShared{ID: f.nextID, Key: key, Value: value})
+	s := &fakeShared{ID: f.nextID, Key: key, Value: value}
+	f.team = append(f.team, s)
+	return s
 }
 
 func (f *fakeCoolify) shared(key string) *fakeShared {
@@ -214,6 +235,7 @@ var (
 	reApp     = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)$`)
 	reAppEnvs = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs$`)
 	reAppBulk = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs/bulk$`)
+	reAppEnv  = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs/([A-Za-z0-9_-]+)$`)
 	reAppDest = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/destinations$`)
 	reDest    = regexp.MustCompile(`^/api/v1/destinations/([A-Za-z0-9_-]+)$`)
 )
@@ -230,7 +252,7 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		f.writes = append(f.writes, r.Method+" "+r.URL.Path)
 		raw := map[string]any{}
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !(r.Method == http.MethodDelete && err == io.EOF) {
 			write(w, 400, map[string]any{"message": "json"})
 			return
 		}
@@ -281,7 +303,11 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && p == "/api/v1/team/envs":
 		out := []map[string]any{}
 		for _, s := range f.team {
-			out = append(out, map[string]any{"id": s.ID, "key": s.Key, "value": s.Value, "is_literal": false, "is_shown_once": false, "type": "team"})
+			m := map[string]any{"id": s.ID, "key": s.Key, "is_literal": false, "is_shown_once": s.Locked, "type": "team"}
+			if !s.Locked && !s.Hidden {
+				m["value"] = s.Value
+			}
+			out = append(out, m)
 		}
 		write(w, 200, out)
 	case r.Method == "POST" && p == "/api/v1/team/envs":
@@ -296,12 +322,15 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(w, 409, map[string]any{"message": "Environment variable already exists."})
 			return
 		}
-		var v *string
-		if s, _ := body["value"].(string); s != "" {
-			v = &s
+		s, _ := body["value"].(string)
+		if strings.TrimSpace(s) == "" {
+			write(w, 500, map[string]any{"message": `SQLSTATE[23502]: Not null violation: null value in column "value" of relation "shared_environment_variables"`})
+			return
 		}
-		f.addShared(key, v)
+		f.addShared(key, &s)
 		write(w, 201, map[string]any{"key": key})
+	case r.Method == "DELETE" && reAppEnv.MatchString(p):
+		write(w, 403, map[string]any{"message": "Missing required permissions: delete"})
 	case r.Method == "POST" && p == "/api/v1/applications/private-github-app":
 		f.create(w, body)
 	case r.Method == "PATCH" && reApp.MatchString(p):
