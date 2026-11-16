@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type route struct {
@@ -136,11 +137,17 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("Coolify %s %s : réponse de plus de %d octets", method, path, maxBody)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		msg := strings.Join(strings.Fields(string(raw)), " ")
+		// Masquer avant de tronquer : une coupe au milieu du jeton laisserait
+		// passer son début.
+		msg := c.redact(strings.Join(strings.Fields(string(raw)), " "))
 		if len(msg) > maxErrLen {
-			msg = msg[:maxErrLen] + "…"
+			cut := maxErrLen
+			for cut > 0 && !utf8.RuneStart(msg[cut]) {
+				cut--
+			}
+			msg = msg[:cut] + "…"
 		}
-		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: c.redact(msg)}
+		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: msg}
 	}
 	if out == nil {
 		return nil

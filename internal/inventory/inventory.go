@@ -125,10 +125,11 @@ func Parse(b []byte, platforms map[string]bool) ([]App, error) {
 	apps := make([]App, 0, len(names))
 	for _, n := range names {
 		a := merge(n, f.Defaults, f.Apps[n])
-		if err := validate(a, platforms); err != nil {
+		hosts, err := validate(a, platforms)
+		if err != nil {
 			return nil, fmt.Errorf("inventaire, app %s : %w", n, err)
 		}
-		for _, h := range a.Hosts {
+		for _, h := range hosts {
 			if o, ok := owner[h]; ok {
 				return nil, fmt.Errorf("inventaire : host %s revendiqué par %s et %s", h, o, n)
 			}
@@ -191,7 +192,45 @@ func merge(name string, def, e entry) App {
 	return a
 }
 
-func validate(a App, platforms map[string]bool) error {
+// validate rend les hosts tels que render.ParseHosts les lit, pour que les
+// contrôles entre apps portent sur ce que le WAF verra.
+func validate(a App, platforms map[string]bool) ([]string, error) {
+	hosts, err := validateHosts(a.Hosts)
+	if err != nil {
+		return nil, err
+	}
+	return hosts, validateRest(a, platforms)
+}
+
+// validateHosts lit chaque host seul : ParseHosts sur la liste jointe accepte
+// une virgule ou un espace dans une entrée, qui changerait WAF_HOSTS.
+func validateHosts(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("hosts manquants")
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, h := range in {
+		parsed, err := render.ParseHosts(h)
+		if err != nil {
+			return nil, err
+		}
+		if len(parsed) != 1 || parsed[0] != h {
+			return nil, fmt.Errorf("host %q : un seul host par entrée, sans virgule ni espace", h)
+		}
+		if seen[parsed[0]] {
+			return nil, fmt.Errorf("host %s en double", parsed[0])
+		}
+		seen[parsed[0]] = true
+		out = append(out, parsed[0])
+	}
+	if _, err := render.ParseHosts(strings.Join(out, ",")); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func validateRest(a App, platforms map[string]bool) error {
 	if !reName.MatchString(a.Name) || strings.HasSuffix(a.Name, "-") {
 		return fmt.Errorf("nom invalide : minuscules, chiffres et tirets, 41 caractères au plus")
 	}
@@ -200,19 +239,6 @@ func validate(a App, platforms map[string]bool) error {
 	}
 	if !platforms[a.Platform] {
 		return fmt.Errorf("plateforme %q absente de policy/origines.yaml", a.Platform)
-	}
-	if len(a.Hosts) == 0 {
-		return fmt.Errorf("hosts manquants")
-	}
-	if _, err := render.ParseHosts(strings.Join(a.Hosts, ",")); err != nil {
-		return err
-	}
-	seen := map[string]bool{}
-	for _, h := range a.Hosts {
-		if seen[h] {
-			return fmt.Errorf("host %s en double", h)
-		}
-		seen[h] = true
 	}
 	if a.HostHeader != "visitor" && a.HostHeader != "upstream" {
 		return fmt.Errorf("host_header %q : visitor ou upstream", a.HostHeader)

@@ -27,14 +27,20 @@ type fakeCoolify struct {
 	writes   []string
 	nextID   int
 	bodies   []string
+
+	// createLandsOn, s'il est posé, remplace la destination demandée à la création.
+	createLandsOn string
+	// ignorePatch liste les champs que le PATCH d'app accepte sans les écrire.
+	ignorePatch map[string]bool
 }
 
 type fakeDest struct{ Name, Network, Server string }
 
 type fakeApp struct {
-	data map[string]any
-	dest string
-	envs []*fakeEnv
+	data  map[string]any
+	dest  string
+	extra []string
+	envs  []*fakeEnv
 }
 
 type fakeEnv struct {
@@ -249,8 +255,12 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, a.data)
 	case r.Method == "GET" && reAppDest.MatchString(p):
 		a := f.apps[reAppDest.FindStringSubmatch(p)[1]]
-		d := f.dests[a.dest]
-		write(w, 200, []map[string]any{{"uuid": a.dest, "name": d.Name, "network": d.Network, "server_uuid": d.Server, "is_primary": true}})
+		out := []map[string]any{}
+		for i, u := range append([]string{a.dest}, a.extra...) {
+			d := f.dests[u]
+			out = append(out, map[string]any{"uuid": u, "name": d.Name, "network": d.Network, "server_uuid": d.Server, "is_primary": i == 0})
+		}
+		write(w, 200, out)
 	case r.Method == "GET" && reAppEnvs.MatchString(p):
 		a := f.apps[reAppEnvs.FindStringSubmatch(p)[1]]
 		var out []map[string]any
@@ -298,6 +308,7 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a := f.apps[reApp.FindStringSubmatch(p)[1]]
 		for k, v := range body {
 			switch {
+			case f.ignorePatch[k]:
 			case k == "domains":
 				a.data["fqdn"] = v
 			case k == "github_app_uuid":
@@ -402,6 +413,9 @@ func (f *fakeCoolify) create(w http.ResponseWriter, body map[string]any) {
 	}
 	if body["instant_deploy"] == true {
 		f.t.Errorf("création avec instant_deploy")
+	}
+	if f.createLandsOn != "" {
+		dest = f.createLandsOn
 	}
 	f.apps[uuid] = &fakeApp{data: d, dest: dest}
 	write(w, 201, map[string]any{"uuid": uuid, "domains": strings.Split(fmt.Sprint(body["domains"]), ",")})

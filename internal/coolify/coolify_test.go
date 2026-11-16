@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRoutes(t *testing.T) {
@@ -73,6 +74,49 @@ func TestJetonEnEnTeteSeulement(t *testing.T) {
 	}
 	if len(he.Body) > maxErrLen+4 {
 		t.Fatalf("corps non tronqué : %d octets", len(he.Body))
+	}
+}
+
+func erreurHTTP(t *testing.T, token, body string) (*HTTPError, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.UpdateApplication(context.Background(), "abc", map[string]any{"x": 1})
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("erreur = %v", err)
+	}
+	return he, err
+}
+
+func TestJetonAChevalDeLaTroncature(t *testing.T) {
+	const token = "1|jeton-de-test-tres-secret"
+	for _, start := range []int{285, 290, 295, 299} {
+		body := strings.Repeat("a", start-1) + "  \n\t " + token + " " + strings.Repeat("b", 500)
+		he, err := erreurHTTP(t, token, body)
+		if strings.Contains(err.Error(), token[:8]) {
+			t.Fatalf("jeton coupé à l'octet %d, préfixe dans l'erreur : %v", start, err)
+		}
+		if len(he.Body) > maxErrLen+len("…") {
+			t.Fatalf("corps non tronqué : %d octets", len(he.Body))
+		}
+	}
+}
+
+func TestTroncatureSurUneRune(t *testing.T) {
+	he, _ := erreurHTTP(t, "1|jeton-de-test-tres-secret", strings.Repeat("a", maxErrLen-1)+strings.Repeat("é", 50))
+	if !utf8.ValidString(he.Body) {
+		t.Fatalf("rune coupée : %q", he.Body[len(he.Body)-8:])
+	}
+	if !strings.HasSuffix(he.Body, "…") {
+		t.Fatalf("troncature non signalée : %q", he.Body)
 	}
 }
 

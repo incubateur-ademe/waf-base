@@ -331,6 +331,101 @@ func TestDestinationCoolifyRefusee(t *testing.T) {
 	}
 }
 
+func TestDestinationAdditionnelleRefusee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.extra = []string{"dest-coolify"}
+	_, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "destination additionnelle dest-coolify") || !strings.Contains(err.Error(), `réseau "coolify"`) {
+		t.Fatalf("erreur = %v", err)
+	}
+	if len(f.writes) != 0 {
+		t.Fatalf("écritures : %v", f.writes)
+	}
+
+	f2, srv2 := newFake(t, testToken)
+	f2.dests["dest-waf-2"] = fakeDest{"waf-1-waf-2", "waf-2", "srv-waf-1"}
+	pilotApp(f2).extra = []string{"dest-waf-2"}
+	_, err = run(t, srv2.URL, testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "destination additionnelle dest-waf-2") {
+		t.Fatalf("destination additionnelle hors réseau coolify : erreur = %v", err)
+	}
+	if len(f2.writes) != 0 {
+		t.Fatalf("écritures : %v", f2.writes)
+	}
+}
+
+func TestDestinationRelueApresCreation(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	f.addShared("WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"))
+	f.createLandsOn = "dest-coolify"
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "waf-waf-pilote-1 créée, mais") || !strings.Contains(err.Error(), `réseau "coolify"`) {
+		t.Fatalf("erreur = %v\n%s", err, out)
+	}
+	var creations int
+	for _, w := range f.writes {
+		switch {
+		case w == "POST /api/v1/applications/private-github-app":
+			creations++
+		case strings.HasPrefix(w, "PATCH "):
+			t.Fatalf("écriture après une destination refusée : %v", f.writes)
+		}
+	}
+	if creations != 1 {
+		t.Fatalf("écritures : %v", f.writes)
+	}
+}
+
+func TestIdempotenceControlee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	f.addShared("UPSTREAM_WAF_PILOTE", ptr(pilotUpstream))
+	f.ignorePatch = map[string]bool{"stop_grace_period": true}
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "idempotence") {
+		t.Fatalf("erreur = %v\n%s", err, out)
+	}
+	mustContain(t, out, "second calcul :", "~ stop_grace_period : (vide) -> 20")
+	if strings.Contains(out, "idempotence vérifiée") {
+		t.Fatalf("idempotence annoncée :\n%s", out)
+	}
+}
+
+func TestSourceGithubAppCorrigee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.data["source_id"] = 3
+	apps := testApps(t, "waf-pilote")
+
+	out, err := run(t, srv.URL, apps, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, `~ source : App\Models\GithubApp #3 -> GithubApp #7`)
+	if len(f.writes) != 0 {
+		t.Fatalf("écritures sans --apply : %v", f.writes)
+	}
+
+	out, err = run(t, srv.URL, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+	if norm(plain, a.data["source_id"]) != "7" {
+		t.Fatalf("source_id = %v", a.data["source_id"])
+	}
+	var patched bool
+	for _, b := range f.bodies {
+		if strings.Contains(b, `"github_app_uuid":"`+ghAppUUID+`"`) {
+			patched = true
+		}
+	}
+	if !patched {
+		t.Fatalf("github_app_uuid absent des écritures : %v", f.bodies)
+	}
+}
+
 func TestDoublonDeNom(t *testing.T) {
 	f, srv := newFake(t, testToken)
 	f.addApp("waf-waf-pilote-1", "dest-waf", nil)

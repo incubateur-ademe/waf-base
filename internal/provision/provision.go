@@ -288,12 +288,9 @@ func envValue(e coolify.Env) string {
 	return e.Value.Value
 }
 
-func checkDestination(d coolify.Destination, cfg Config) error {
+func checkPlacement(d coolify.Destination, cfg Config) error {
 	if d.Network == "" || d.Network == forbiddenNetwork {
 		return fmt.Errorf("destination %s sur le réseau %q : refusée, le WAF doit être sur le réseau waf du serveur", d.UUID, d.Network)
-	}
-	if d.UUID != cfg.DestinationUUID {
-		return fmt.Errorf("destination %s attendue, %s trouvée ; provision ne déplace pas une app", cfg.DestinationUUID, d.UUID)
 	}
 	if d.ServerUUID != "" && d.ServerUUID != cfg.ServerUUID {
 		return fmt.Errorf("destination %s sur le serveur %s, %s attendu", d.UUID, d.ServerUUID, cfg.ServerUUID)
@@ -301,17 +298,40 @@ func checkDestination(d coolify.Destination, cfg Config) error {
 	return nil
 }
 
+func checkDestination(d coolify.Destination, cfg Config) error {
+	if err := checkPlacement(d, cfg); err != nil {
+		return err
+	}
+	if d.UUID != cfg.DestinationUUID {
+		return fmt.Errorf("destination %s attendue, %s trouvée ; provision ne déplace pas une app", cfg.DestinationUUID, d.UUID)
+	}
+	return nil
+}
+
+// checkAppDestination contrôle chaque destination de l'app : une destination
+// additionnelle ferait tourner une copie du WAF hors de la destination voulue.
 func checkAppDestination(ctx context.Context, api API, uuid string, cfg Config) error {
 	ds, err := api.ApplicationDestinations(ctx, uuid)
 	if err != nil {
 		return err
 	}
+	primary := 0
 	for _, d := range ds {
-		if d.IsPrimary {
-			return checkDestination(d, cfg)
+		if !d.IsPrimary {
+			if err := checkPlacement(d, cfg); err != nil {
+				return fmt.Errorf("destination additionnelle %s : %w", d.UUID, err)
+			}
+			return fmt.Errorf("destination additionnelle %s (réseau %q) : refusée en v1, le WAF ne tourne que sur %s", d.UUID, d.Network, cfg.DestinationUUID)
 		}
+		if err := checkDestination(d, cfg); err != nil {
+			return err
+		}
+		primary++
 	}
-	return fmt.Errorf("aucune destination principale")
+	if primary != 1 {
+		return fmt.Errorf("%d destination(s) principale(s), une attendue", primary)
+	}
+	return nil
 }
 
 var reTeamRef = regexp.MustCompile(`\{\{\s*team\.([A-Za-z0-9_]+)\s*\}\}`)
