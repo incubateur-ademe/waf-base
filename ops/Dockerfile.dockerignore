@@ -1,0 +1,13 @@
+.git
+.github
+tests
+infra
+lint
+*.md
+caddy
+coraza
+crs
+plugins
+main.go
+Dockerfile
+inventaire.yaml
