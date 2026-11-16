@@ -2,22 +2,28 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
+	"github.com/incubateur-ademe/waf-base/internal/provision"
 	"github.com/incubateur-ademe/waf-base/internal/runner"
 )
 
 const usage = `wafgen <commande> [--etc /etc/waf]
 
-  check   lint du waf/ du tenant, rendu fictif, caddy validate, attaque canonique en mémoire
-  run     rendu depuis les variables ops, lancement de Caddy, contrôles de démarrage
-  rev     empreinte de waf/ (Dockerfile exclu), comme run et l'audit la calculent
+  check      lint du waf/ du tenant, rendu fictif, caddy validate, attaque canonique en mémoire
+  run        rendu depuis les variables ops, lancement de Caddy, contrôles de démarrage
+  rev        empreinte de waf/ (Dockerfile exclu), comme run et l'audit la calculent
+  provision  aligne les apps WAF de Coolify sur l'inventaire (plan seul sans --apply)
 
-Prévus aux étapes suivantes : smoke, status, rules, provision, audit, rollout.`
+Prévus aux étapes suivantes : smoke, status, rules, audit, rollout.`
 
 func main() {
 	log.SetFlags(0)
@@ -27,6 +33,18 @@ func main() {
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
+	if cmd == "provision" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := provision.Main(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(2)
+		}
+		if err != nil {
+			log.Fatalf("provision : %v", err)
+		}
+		return
+	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	etc := fs.String("etc", "/etc/waf", "racine de la conf de base")
 	state := fs.String("state", "/var/lib/waf", "dossier des fichiers générés")
@@ -54,7 +72,7 @@ func main() {
 			log.Fatal(err)
 		}
 		fmt.Println(rev)
-	case "smoke", "status", "rules", "provision", "audit", "rollout":
+	case "smoke", "status", "rules", "audit", "rollout":
 		log.Printf("%s : pas encore écrit (étapes 2 et suivantes)", cmd)
 		os.Exit(2)
 	default:
