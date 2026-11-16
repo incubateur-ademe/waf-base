@@ -3,6 +3,7 @@ package provision
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -13,7 +14,8 @@ import (
 
 // fakeCoolify reproduit le comportement de l'API Coolify 4.7.5 lu dans son code :
 // variables en is_buildtime=true par défaut, copie preview créée avec chaque
-// variable, chaîne vide convertie en null, réglages d'app rangés sous settings.
+// variable, chaîne vide convertie en null, réglages d'app rangés sous settings,
+// variable d'équipe jamais vide (colonne value NOT NULL : HTTP 500 sur "").
 type fakeCoolify struct {
 	t     *testing.T
 	token string
@@ -73,6 +75,13 @@ func newFake(t *testing.T, token string) (*fakeCoolify, *httptest.Server) {
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		for _, w := range f.writes {
+			if strings.HasPrefix(w, "POST /api/v1/team/envs") || strings.Contains(w, "/team/envs/") {
+				t.Errorf("écriture d'une variable d'équipe : %s", w)
+			}
+		}
+	})
 	return f, srv
 }
 
@@ -174,6 +183,9 @@ func (a *fakeApp) setEnv(f *fakeCoolify, key string, value *string, buildtime, r
 }
 
 func (f *fakeCoolify) addShared(key string, value *string) {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		f.t.Fatalf("variable d'équipe %s vide : impossible dans Coolify", key)
+	}
 	f.nextID++
 	f.team = append(f.team, &fakeShared{ID: f.nextID, Key: key, Value: value})
 }
@@ -214,6 +226,7 @@ var (
 	reApp     = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)$`)
 	reAppEnvs = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs$`)
 	reAppBulk = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs/bulk$`)
+	reAppEnv  = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs/([A-Za-z0-9_-]+)$`)
 	reAppDest = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/destinations$`)
 	reDest    = regexp.MustCompile(`^/api/v1/destinations/([A-Za-z0-9_-]+)$`)
 )
@@ -230,7 +243,7 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		f.writes = append(f.writes, r.Method+" "+r.URL.Path)
 		raw := map[string]any{}
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && !(r.Method == http.MethodDelete && err == io.EOF) {
 			write(w, 400, map[string]any{"message": "json"})
 			return
 		}
@@ -296,12 +309,28 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(w, 409, map[string]any{"message": "Environment variable already exists."})
 			return
 		}
-		var v *string
-		if s, _ := body["value"].(string); s != "" {
-			v = &s
+		s, _ := body["value"].(string)
+		if strings.TrimSpace(s) == "" {
+			write(w, 500, map[string]any{"message": `SQLSTATE[23502]: Not null violation: null value in column "value" of relation "shared_environment_variables"`})
+			return
 		}
-		f.addShared(key, v)
+		f.addShared(key, &s)
 		write(w, 201, map[string]any{"key": key})
+	case r.Method == "DELETE" && reAppEnv.MatchString(p):
+		m := reAppEnv.FindStringSubmatch(p)
+		a := f.apps[m[1]]
+		if a == nil {
+			write(w, 404, map[string]any{"message": "Application not found."})
+			return
+		}
+		for i, e := range a.envs {
+			if e.UUID == m[2] {
+				a.envs = append(a.envs[:i], a.envs[i+1:]...)
+				write(w, 200, map[string]any{"message": "Environment variable deleted."})
+				return
+			}
+		}
+		write(w, 404, map[string]any{"message": "Environment variable not found."})
 	case r.Method == "POST" && p == "/api/v1/applications/private-github-app":
 		f.create(w, body)
 	case r.Method == "PATCH" && reApp.MatchString(p):

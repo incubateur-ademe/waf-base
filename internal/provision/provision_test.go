@@ -3,6 +3,7 @@ package provision
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -93,7 +94,7 @@ func mustContain(t *testing.T, s string, parts ...string) {
 }
 
 // pilotApp pose l'app pilote telle qu'en service : réglages faits à la main,
-// stop_grace_period vide et UPSTREAM littéral.
+// stop_grace_period vide, UPSTREAM littéral, aucune variable d'équipe hors WAF_BASE.
 func pilotApp(f *fakeCoolify) *fakeApp {
 	a := f.addApp("waf-waf-pilote-1", "dest-waf", map[string]any{
 		"git_repository": "incubateur-ademe/waf-pilote", "git_branch": "main", "build_pack": "dockerfile",
@@ -111,15 +112,9 @@ func pilotApp(f *fakeCoolify) *fakeApp {
 	a.setEnv(f, "WAF_CRS_PLUGINS", nil, false, true)
 	a.setEnv(f, "WAF_CEILINGS", ptr("events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"), false, true)
 	a.setEnv(f, "UPSTREAM", ptr(pilotUpstream), false, true)
-	a.setEnv(f, "WAF_DETECTION_UNTIL", ptr("{{team.DETECTION_UNTIL_WAF_PILOTE}}"), false, true)
-	a.setEnv(f, "WAF_UNINSPECTED_PATHS", ptr("{{team.UNINSPECTED_PATHS_WAF_PILOTE}}"), false, true)
-	a.setEnv(f, "WAF_FORCE_DETECTION", ptr("{{team.FORCE_DETECTION_WAF_PILOTE}}"), false, true)
 	a.setEnv(f, "WAF_BASE", ptr("{{team.WAF_BASE}}"), true, false)
 	a.setEnv(f, "NOTE_OPS", ptr("pilote"), false, true)
 	f.addShared("WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"))
-	f.addShared("DETECTION_UNTIL_WAF_PILOTE", nil)
-	f.addShared("UNINSPECTED_PATHS_WAF_PILOTE", nil)
-	f.addShared("FORCE_DETECTION_WAF_PILOTE", ptr("2026-11-17T00:00:00+01:00"))
 	return a
 }
 
@@ -165,14 +160,16 @@ func TestCreation(t *testing.T) {
 	mustContain(t, out,
 		"waf-koyo-1 : création", "waf-waf-pilote-1 : création",
 		"domains = http://koyo.example.org:8080,http://www.koyo.example.org:8080",
-		"+ variable d'équipe UPSTREAM_KOYO, créée vide",
-		"+ variable d'équipe ORIGIN_TOKEN_KOYO, créée vide",
-		"action ops : saisir UPSTREAM_KOYO",
-		"action ops : saisir ORIGIN_TOKEN_KOYO",
+		"+ env WAF_DETECTION_UNTIL = \"{{team.DETECTION_UNTIL_KOYO}}\"",
+		"action ops : créer UPSTREAM_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là UPSTREAM n'est pas posée",
+		"action ops : créer ORIGIN_TOKEN_KOYO avec sa valeur dans l'UI Coolify",
+		"action ops : créer UPSTREAM_WAF_PILOTE avec sa valeur",
 		"plan seul",
 	)
-	if strings.Contains(out, "variable d'équipe DETECTION_UNTIL_KOYO") {
-		t.Fatal("variable partagée existante recréée")
+	for _, k := range []string{"créée vide", "saisir", "env UPSTREAM", "env ORIGIN_TOKEN", "env WAF_UNINSPECTED_PATHS", "env WAF_FORCE_DETECTION", "UNTIL_WAF_PILOTE"} {
+		if strings.Contains(out, k) {
+			t.Fatalf("plan avec %q :\n%s", k, out)
+		}
 	}
 
 	out, err = run(t, srv.URL, apps, true)
@@ -181,10 +178,8 @@ func TestCreation(t *testing.T) {
 	}
 	mustContain(t, out, "idempotence vérifiée")
 
-	for _, k := range []string{"UPSTREAM_KOYO", "ORIGIN_TOKEN_KOYO", "UPSTREAM_WAF_PILOTE", "FORCE_DETECTION_WAF_PILOTE"} {
-		if s := f.shared(k); s == nil || s.Value != nil {
-			t.Fatalf("%s : %+v, attendue créée vide", k, s)
-		}
+	if len(f.team) != 2 {
+		t.Fatalf("variables d'équipe : %d, 2 attendues", len(f.team))
 	}
 	if v := f.shared("DETECTION_UNTIL_KOYO").Value; v == nil || *v != "2026-11-20T00:00:00+01:00" {
 		t.Fatal("valeur partagée existante modifiée")
@@ -218,11 +213,17 @@ func TestCreation(t *testing.T) {
 	if err != nil || c != render.DefaultCeilings() {
 		t.Fatalf("WAF_CEILINGS = %q : %+v, %v", *ceil.Value, c, err)
 	}
-	if v := a.env("UPSTREAM").Value; v == nil || *v != "{{team.UPSTREAM_WAF_PILOTE}}" {
-		t.Fatalf("UPSTREAM = %v", v)
+	for _, k := range []string{"UPSTREAM", "WAF_DETECTION_UNTIL", "WAF_UNINSPECTED_PATHS", "WAF_FORCE_DETECTION"} {
+		if a.env(k) != nil {
+			t.Fatalf("%s posée sur le pilote sans variable d'équipe", k)
+		}
 	}
-	if v := f.appByName("waf-koyo-1").env("ORIGIN_TOKEN"); v == nil || *v.Value != "{{team.ORIGIN_TOKEN_KOYO}}" {
-		t.Fatal("ORIGIN_TOKEN absent sur l'app Koyeb")
+	koyo := f.appByName("waf-koyo-1")
+	if koyo.env("UPSTREAM") != nil || koyo.env("ORIGIN_TOKEN") != nil {
+		t.Fatal("référence requise posée sans variable d'équipe")
+	}
+	if v := koyo.env("WAF_DETECTION_UNTIL"); v == nil || *v.Value != "{{team.DETECTION_UNTIL_KOYO}}" {
+		t.Fatal("WAF_DETECTION_UNTIL absente alors que la clé existe")
 	}
 	for _, w := range f.writes {
 		if strings.Contains(w, "deploy") || strings.Contains(w, "start") || strings.Contains(w, "restart") {
@@ -235,7 +236,22 @@ func TestCreation(t *testing.T) {
 	if err != nil || len(f.writes) != n {
 		t.Fatalf("troisième passage : %v, %d écritures\n%s", err, len(f.writes)-n, out)
 	}
-	mustContain(t, out, "0 changement(s) prévu(s)")
+	mustContain(t, out, "0 changement(s) prévu(s)", "action ops : créer UPSTREAM_KOYO")
+
+	// ops crée les clés requises avec leur valeur dans l'UI, puis relance provision.
+	f.addShared("UPSTREAM_KOYO", ptr("https://koyo.koyeb.app"))
+	f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `+ env UPSTREAM = "{{team.UPSTREAM_KOYO}}"`, `+ env ORIGIN_TOKEN = "{{team.ORIGIN_TOKEN_KOYO}}"`, "idempotence vérifiée")
+	if strings.Contains(out, "action ops") || strings.Contains(out, "jeton-origine-koyo") {
+		t.Fatalf("sortie :\n%s", out)
+	}
+	if v := koyo.env("UPSTREAM"); v == nil || *v.Value != "{{team.UPSTREAM_KOYO}}" {
+		t.Fatal("UPSTREAM non posée une fois la clé créée")
+	}
 }
 
 func TestMiseAJourPilote(t *testing.T) {
@@ -255,13 +271,12 @@ func TestMiseAJourPilote(t *testing.T) {
 		"waf-waf-pilote-1 ("+a.data["uuid"].(string)+") : mise à jour",
 		"~ stop_grace_period : (vide) -> 20",
 		`~ env WAF_TENANT : "waf-pilote" build=true runtime=true -> "waf-pilote" build=false runtime=true`,
-		"+ variable d'équipe UPSTREAM_WAF_PILOTE, créée vide",
 		`UPSTREAM : valeur littérale "`+pilotUpstream+`" conservée`,
-		"action ops : saisir UPSTREAM_WAF_PILOTE dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision",
+		"action ops : créer UPSTREAM_WAF_PILOTE avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision pour remplacer la valeur littérale",
 		"variable hors liste conservée : NOTE_OPS",
 		"redéploiement nécessaire",
 	)
-	if strings.Contains(out, "health_check") || strings.Contains(out, "env UPSTREAM") || strings.Contains(out, "is_git_lfs") {
+	if strings.Contains(out, "health_check") || strings.Contains(out, "env UPSTREAM") || strings.Contains(out, "is_git_lfs") || strings.Contains(out, "env WAF_DETECTION_UNTIL") || strings.Contains(out, "créée vide") {
 		t.Fatalf("écart inattendu :\n%s", out)
 	}
 
@@ -276,8 +291,8 @@ func TestMiseAJourPilote(t *testing.T) {
 	if a.env("NOTE_OPS") == nil {
 		t.Fatal("variable hors liste supprimée")
 	}
-	if v := f.shared("FORCE_DETECTION_WAF_PILOTE").Value; v == nil || *v != "2026-11-17T00:00:00+01:00" {
-		t.Fatal("valeur partagée existante modifiée")
+	if len(f.team) != 1 {
+		t.Fatalf("variables d'équipe : %d, WAF_BASE seule attendue", len(f.team))
 	}
 	for _, w := range f.writes {
 		if strings.HasPrefix(w, "POST /api/v1/applications") {
@@ -552,4 +567,100 @@ func TestOriginTokenLitteralMasque(t *testing.T) {
 	if e := a.env("ORIGIN_TOKEN"); *e.Value != secret || e.Buildtime {
 		t.Fatalf("ORIGIN_TOKEN : %+v", e)
 	}
+}
+
+func TestReferencesOptionnelles(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.setEnv(f, "WAF_DETECTION_UNTIL", ptr("{{team.DETECTION_UNTIL_WAF_PILOTE}}"), false, true)
+	a.setEnv(f, "WAF_UNINSPECTED_PATHS", ptr("/metrics"), false, true)
+	a.setEnv(f, "WAF_FORCE_DETECTION", ptr("{{ team.FORCE_DETECTION_WAF_PILOTE }}"), false, true)
+	f.addShared("FORCE_DETECTION_WAF_PILOTE", ptr("2026-11-17T00:00:00+01:00"))
+	apps := testApps(t, "waf-pilote")
+
+	out, err := run(t, srv.URL, apps, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.writes) != 0 {
+		t.Fatalf("écritures sans --apply : %v", f.writes)
+	}
+	mustContain(t, out,
+		`- env WAF_DETECTION_UNTIL = "{{team.DETECTION_UNTIL_WAF_PILOTE}}"`,
+		"WAF_DETECTION_UNTIL : référence orpheline, wafgen run refuserait de démarrer",
+		`WAF_UNINSPECTED_PATHS : valeur littérale "/metrics" conservée`,
+	)
+	if strings.Contains(out, "env WAF_FORCE_DETECTION") || strings.Contains(out, "env WAF_UNINSPECTED_PATHS") {
+		t.Fatalf("écart inattendu :\n%s", out)
+	}
+
+	out, err = run(t, srv.URL, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+	for _, e := range a.envs {
+		if e.Key == "WAF_DETECTION_UNTIL" {
+			t.Fatalf("référence orpheline restée sur l'app (preview=%t)", e.Preview)
+		}
+	}
+	var dels int
+	for _, w := range f.writes {
+		if strings.HasPrefix(w, "DELETE /api/v1/applications/"+a.data["uuid"].(string)+"/envs/") {
+			dels++
+		}
+	}
+	if dels != 2 {
+		t.Fatalf("suppressions : %d, la variable et sa copie preview attendues : %v", dels, f.writes)
+	}
+	if v := a.env("WAF_UNINSPECTED_PATHS").Value; v == nil || *v != "/metrics" {
+		t.Fatalf("WAF_UNINSPECTED_PATHS littérale modifiée : %v", v)
+	}
+	if v := a.env("WAF_FORCE_DETECTION").Value; v == nil || *v != "{{ team.FORCE_DETECTION_WAF_PILOTE }}" {
+		t.Fatalf("WAF_FORCE_DETECTION : %v", v)
+	}
+}
+
+func TestReferenceRequiseOrphelineConservee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	f.addShared("WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"))
+	a := f.addApp("waf-koyo-1", "dest-waf", nil)
+	a.setEnv(f, "UPSTREAM", ptr("{{team.UPSTREAM_KOYO}}"), false, true)
+	out, err := run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out,
+		"UPSTREAM : référence orpheline, wafgen run refuserait de démarrer",
+		"action ops : créer UPSTREAM_KOYO avec sa valeur dans l'UI Coolify",
+		"idempotence vérifiée",
+	)
+	if strings.Contains(out, "- env UPSTREAM") || a.env("UPSTREAM") == nil {
+		t.Fatalf("UPSTREAM requise supprimée :\n%s", out)
+	}
+	for _, w := range f.writes {
+		if strings.HasPrefix(w, "DELETE ") {
+			t.Fatalf("suppression d'une référence requise : %s", w)
+		}
+	}
+}
+
+func TestFauxCoolifyRefuseUneValeurPartageeVide(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	for _, v := range []string{"", "   "} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/team/envs", strings.NewReader(`{"key":"UPSTREAM_X","value":"`+v+`"}`))
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 500 {
+			t.Fatalf("valeur %q : HTTP %d, 500 attendu comme Coolify 4.7.5", v, resp.StatusCode)
+		}
+	}
+	if f.shared("UPSTREAM_X") != nil {
+		t.Fatal("variable vide créée")
+	}
+	f.writes = nil
 }

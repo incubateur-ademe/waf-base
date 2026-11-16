@@ -23,7 +23,7 @@ func TestRoutes(t *testing.T) {
 		{"POST", "/api/v1/applications/private-github-app"},
 		{"PATCH", "/api/v1/applications/abc123"},
 		{"PATCH", "/api/v1/applications/abc123/envs/bulk"},
-		{"POST", "/api/v1/team/envs"},
+		{"DELETE", "/api/v1/applications/abc123/envs/env42"},
 	}
 	for _, r := range ok {
 		if !Allowed(r.m, r.p) {
@@ -36,7 +36,9 @@ func TestRoutes(t *testing.T) {
 		{"GET", "/api/v1/deploy"},
 		{"POST", "/api/v1/applications/abc123/start"},
 		{"PATCH", "/api/v1/team/envs/12"},
-		{"DELETE", "/api/v1/applications/abc123/envs/x"},
+		{"POST", "/api/v1/team/envs"},
+		{"DELETE", "/api/v1/team/envs/12"},
+		{"DELETE", "/api/v1/applications/abc123/envs"},
 		{"GET", "/api/v1/applications/../servers"},
 		{"POST", "/api/v1/servers/s1/envs"},
 	}
