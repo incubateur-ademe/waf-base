@@ -286,6 +286,25 @@ func TestMiseAJourPilote(t *testing.T) {
 	}
 }
 
+func TestReferenceAvecEspaces(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.env("WAF_BASE").Value = ptr("{{ team.WAF_BASE }}")
+	apps := testApps(t, "waf-pilote")
+
+	out, err := run(t, srv.URL, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "env WAF_BASE") {
+		t.Fatalf("WAF_BASE réécrite pour des espaces :\n%s", out)
+	}
+	if v := a.env("WAF_BASE").Value; v == nil || *v != "{{ team.WAF_BASE }}" {
+		t.Fatalf("WAF_BASE modifiée : %v", v)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+}
+
 func TestUpstreamRemplaceSiPartageeRemplie(t *testing.T) {
 	f, srv := newFake(t, testToken)
 	a := pilotApp(f)

@@ -281,6 +281,14 @@ func showEnv(key, v string) string {
 	return strconv.Quote(v)
 }
 
+// Coolify résout « {{ team.X }} » comme « {{team.X}} » et stocke la valeur telle quelle.
+// Deux références qui ne diffèrent que par ces espaces comptent comme égales.
+var refSpaces = regexp.MustCompile(`\{\{\s*(\w+)\.([^}\s]+)\s*\}\}`)
+
+func sameValue(a, b string) bool {
+	return refSpaces.ReplaceAllString(a, "{{$1.$2}}") == refSpaces.ReplaceAllString(b, "{{$1.$2}}")
+}
+
 func envValue(e coolify.Env) string {
 	if e.Value.Null {
 		return ""
@@ -448,7 +456,7 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 			return ap, fmt.Errorf("valeur de %s illisible : le jeton doit avoir read:sensitive", w.key)
 		}
 		old := envValue(e)
-		valueOK := ok && old == value
+		valueOK := ok && sameValue(old, value)
 		literalKept := false
 		if ok && !valueOK && w.shared != "" && strings.TrimSpace(old) != "" && !strings.Contains(old, "{{") {
 			// Une valeur littérale en service ne cède la place à la référence que si
