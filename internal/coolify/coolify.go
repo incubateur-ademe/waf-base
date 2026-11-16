@@ -35,7 +35,6 @@ var routes = []route{
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/applications/private-github-app$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `/envs/bulk$`)},
-	{http.MethodDelete, regexp.MustCompile(`^/api/v1/applications/` + seg + `/envs/` + seg + `$`)},
 }
 
 // Allowed dit si le client accepte d'appeler cette route.
@@ -275,8 +274,4 @@ func (c *Client) UpsertApplicationEnvs(ctx context.Context, uuid string, envs []
 func (c *Client) ListTeamEnvs(ctx context.Context) ([]SharedEnv, error) {
 	var out []SharedEnv
 	return out, c.do(ctx, http.MethodGet, "/api/v1/team/envs", nil, &out)
-}
-
-func (c *Client) DeleteApplicationEnv(ctx context.Context, uuid, envUUID string) error {
-	return c.do(ctx, http.MethodDelete, "/api/v1/applications/"+uuid+"/envs/"+envUUID, nil, nil)
 }

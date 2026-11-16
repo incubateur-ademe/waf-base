@@ -23,7 +23,6 @@ func TestRoutes(t *testing.T) {
 		{"POST", "/api/v1/applications/private-github-app"},
 		{"PATCH", "/api/v1/applications/abc123"},
 		{"PATCH", "/api/v1/applications/abc123/envs/bulk"},
-		{"DELETE", "/api/v1/applications/abc123/envs/env42"},
 	}
 	for _, r := range ok {
 		if !Allowed(r.m, r.p) {
@@ -32,6 +31,7 @@ func TestRoutes(t *testing.T) {
 	}
 	ko := []struct{ m, p string }{
 		{"DELETE", "/api/v1/applications/abc123"},
+		{"DELETE", "/api/v1/applications/abc123/envs/env42"},
 		{"POST", "/api/v1/deploy"},
 		{"GET", "/api/v1/deploy"},
 		{"POST", "/api/v1/applications/abc123/start"},

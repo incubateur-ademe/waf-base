@@ -15,7 +15,9 @@ import (
 // fakeCoolify reproduit le comportement de l'API Coolify 4.7.5 lu dans son code :
 // variables en is_buildtime=true par défaut, copie preview créée avec chaque
 // variable, chaîne vide convertie en null, réglages d'app rangés sous settings,
-// variable d'équipe jamais vide (colonne value NOT NULL : HTTP 500 sur "").
+// suppression de variable refusée (le jeton SecOps n'a pas l'ability delete).
+// Une variable d'équipe vide n'entre que par la vue développeur de l'UI : POST
+// /team/envs la refuse en HTTP 500 (colonne value NOT NULL).
 type fakeCoolify struct {
 	t     *testing.T
 	token string
@@ -51,10 +53,15 @@ type fakeEnv struct {
 	Buildtime, Runtime, Preview bool
 }
 
+// fakeShared : Locked est une variable verrouillée (is_shown_once), Hidden une
+// valeur que le jeton ne lit pas (sans read:sensitive). Dans les deux cas le GET
+// omet value.
 type fakeShared struct {
-	ID    int
-	Key   string
-	Value *string
+	ID     int
+	Key    string
+	Value  *string
+	Locked bool
+	Hidden bool
 }
 
 const ghAppUUID = "gh-ops"
@@ -182,12 +189,14 @@ func (a *fakeApp) setEnv(f *fakeCoolify, key string, value *string, buildtime, r
 	)
 }
 
-func (f *fakeCoolify) addShared(key string, value *string) {
-	if value == nil || strings.TrimSpace(*value) == "" {
-		f.t.Fatalf("variable d'équipe %s vide : impossible dans Coolify", key)
+func (f *fakeCoolify) addShared(key string, value *string) *fakeShared {
+	if value == nil {
+		f.t.Fatalf("variable d'équipe %s sans valeur", key)
 	}
 	f.nextID++
-	f.team = append(f.team, &fakeShared{ID: f.nextID, Key: key, Value: value})
+	s := &fakeShared{ID: f.nextID, Key: key, Value: value}
+	f.team = append(f.team, s)
+	return s
 }
 
 func (f *fakeCoolify) shared(key string) *fakeShared {
@@ -294,7 +303,11 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && p == "/api/v1/team/envs":
 		out := []map[string]any{}
 		for _, s := range f.team {
-			out = append(out, map[string]any{"id": s.ID, "key": s.Key, "value": s.Value, "is_literal": false, "is_shown_once": false, "type": "team"})
+			m := map[string]any{"id": s.ID, "key": s.Key, "is_literal": false, "is_shown_once": s.Locked, "type": "team"}
+			if !s.Locked && !s.Hidden {
+				m["value"] = s.Value
+			}
+			out = append(out, m)
 		}
 		write(w, 200, out)
 	case r.Method == "POST" && p == "/api/v1/team/envs":
@@ -317,20 +330,7 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.addShared(key, &s)
 		write(w, 201, map[string]any{"key": key})
 	case r.Method == "DELETE" && reAppEnv.MatchString(p):
-		m := reAppEnv.FindStringSubmatch(p)
-		a := f.apps[m[1]]
-		if a == nil {
-			write(w, 404, map[string]any{"message": "Application not found."})
-			return
-		}
-		for i, e := range a.envs {
-			if e.UUID == m[2] {
-				a.envs = append(a.envs[:i], a.envs[i+1:]...)
-				write(w, 200, map[string]any{"message": "Environment variable deleted."})
-				return
-			}
-		}
-		write(w, 404, map[string]any{"message": "Environment variable not found."})
+		write(w, 403, map[string]any{"message": "Missing required permissions: delete"})
 	case r.Method == "POST" && p == "/api/v1/applications/private-github-app":
 		f.create(w, body)
 	case r.Method == "PATCH" && reApp.MatchString(p):

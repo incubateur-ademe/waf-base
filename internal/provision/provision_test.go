@@ -586,11 +586,11 @@ func TestReferencesOptionnelles(t *testing.T) {
 		t.Fatalf("écritures sans --apply : %v", f.writes)
 	}
 	mustContain(t, out,
-		`- env WAF_DETECTION_UNTIL = "{{team.DETECTION_UNTIL_WAF_PILOTE}}"`,
-		"WAF_DETECTION_UNTIL : référence orpheline, wafgen run refuserait de démarrer",
-		`WAF_UNINSPECTED_PATHS : valeur littérale "/metrics" conservée`,
+		`~ env WAF_DETECTION_UNTIL : "{{team.DETECTION_UNTIL_WAF_PILOTE}}" -> ""`,
+		"WAF_DETECTION_UNTIL : référence orpheline, wafgen run refuserait de démarrer ; vidée, DETECTION_UNTIL_WAF_PILOTE étant absente",
+		`WAF_UNINSPECTED_PATHS : valeur littérale "/metrics" conservée, UNINSPECTED_PATHS_WAF_PILOTE étant absente`,
 	)
-	if strings.Contains(out, "env WAF_FORCE_DETECTION") || strings.Contains(out, "env WAF_UNINSPECTED_PATHS") {
+	if strings.Contains(out, "env WAF_FORCE_DETECTION") || strings.Contains(out, "env WAF_UNINSPECTED_PATHS") || strings.Contains(out, "- env") {
 		t.Fatalf("écart inattendu :\n%s", out)
 	}
 
@@ -599,19 +599,13 @@ func TestReferencesOptionnelles(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	mustContain(t, out, "idempotence vérifiée")
-	for _, e := range a.envs {
-		if e.Key == "WAF_DETECTION_UNTIL" {
-			t.Fatalf("référence orpheline restée sur l'app (preview=%t)", e.Preview)
-		}
-	}
-	var dels int
 	for _, w := range f.writes {
-		if strings.HasPrefix(w, "DELETE /api/v1/applications/"+a.data["uuid"].(string)+"/envs/") {
-			dels++
+		if strings.HasPrefix(w, "DELETE ") {
+			t.Fatalf("suppression demandée, le jeton SecOps n'a pas l'ability delete : %v", f.writes)
 		}
 	}
-	if dels != 2 {
-		t.Fatalf("suppressions : %d, la variable et sa copie preview attendues : %v", dels, f.writes)
+	if e := a.env("WAF_DETECTION_UNTIL"); e == nil || e.Value != nil || e.Buildtime || !e.Runtime {
+		t.Fatalf("référence orpheline non neutralisée : %+v", e)
 	}
 	if v := a.env("WAF_UNINSPECTED_PATHS").Value; v == nil || *v != "/metrics" {
 		t.Fatalf("WAF_UNINSPECTED_PATHS littérale modifiée : %v", v)
@@ -631,10 +625,13 @@ func TestReferenceRequiseOrphelineConservee(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	mustContain(t, out,
-		"UPSTREAM : référence orpheline, wafgen run refuserait de démarrer",
-		"action ops : créer UPSTREAM_KOYO avec sa valeur dans l'UI Coolify",
+		"UPSTREAM : référence orpheline, wafgen run refuserait de démarrer\n",
+		"action ops : créer UPSTREAM_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis redéployer l'app\n",
 		"idempotence vérifiée",
 	)
+	if strings.Contains(out, "UPSTREAM n'est pas posée") {
+		t.Fatalf("note « n'est pas posée » alors que l'app porte UPSTREAM :\n%s", out)
+	}
 	if strings.Contains(out, "- env UPSTREAM") || a.env("UPSTREAM") == nil {
 		t.Fatalf("UPSTREAM requise supprimée :\n%s", out)
 	}
@@ -663,4 +660,133 @@ func TestFauxCoolifyRefuseUneValeurPartageeVide(t *testing.T) {
 		t.Fatal("variable vide créée")
 	}
 	f.writes = nil
+}
+
+const wafBaseLiteral = "ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"
+
+func TestWafBaseLitteraleGardee(t *testing.T) {
+	for _, tc := range []struct {
+		name, action string
+		team         *string
+	}{
+		{"absente", "action ops : créer WAF_BASE avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision pour remplacer la valeur littérale", nil},
+		{"vide", "action ops : remplir WAF_BASE dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision pour remplacer la valeur littérale", ptr("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFake(t, testToken)
+			a := pilotApp(f)
+			a.env("WAF_BASE").Value = ptr(wafBaseLiteral)
+			f.team = nil
+			if tc.team != nil {
+				f.addShared("WAF_BASE", tc.team)
+			}
+			out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if strings.Contains(out, "env WAF_BASE") {
+				t.Fatalf("WAF_BASE littérale réécrite :\n%s", out)
+			}
+			mustContain(t, out, `WAF_BASE : valeur littérale "`+wafBaseLiteral+`" conservée, WAF_BASE étant `+tc.name, tc.action, "idempotence vérifiée")
+			if v := a.env("WAF_BASE").Value; v == nil || *v != wafBaseLiteral {
+				t.Fatalf("WAF_BASE = %v", v)
+			}
+		})
+	}
+
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.env("WAF_BASE").Value = ptr(wafBaseLiteral)
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `~ env WAF_BASE : "`+wafBaseLiteral+`" -> "{{team.WAF_BASE}}"`, "idempotence vérifiée")
+}
+
+func TestWafBaseNonPoseeSansCle(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "action ops : créer WAF_BASE avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là WAF_BASE n'est pas posée et le build échoue", "idempotence vérifiée")
+	if strings.Contains(out, "env WAF_BASE") || f.appByName("waf-waf-pilote-1").env("WAF_BASE") != nil {
+		t.Fatalf("WAF_BASE posée sans variable d'équipe :\n%s", out)
+	}
+	if strings.Count(out, "créer WAF_BASE") != 1 {
+		t.Fatalf("note WAF_BASE en double :\n%s", out)
+	}
+}
+
+func TestCleEquipeVide(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	f.addShared("WAF_BASE", ptr(wafBaseLiteral))
+	f.addShared("UPSTREAM_KOYO", ptr(""))
+	f.addShared("DETECTION_UNTIL_KOYO", ptr(""))
+	f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+	out, err := run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "env UPSTREAM") || strings.Contains(out, "créer UPSTREAM_KOYO") {
+		t.Fatalf("référence requise posée sur une clé vide, ou création demandée d'une clé existante :\n%s", out)
+	}
+	mustContain(t, out,
+		"action ops : remplir UPSTREAM_KOYO dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là UPSTREAM n'est pas posée et wafgen run refuse de démarrer",
+		`+ env WAF_DETECTION_UNTIL = "{{team.DETECTION_UNTIL_KOYO}}"`,
+		`+ env ORIGIN_TOKEN = "{{team.ORIGIN_TOKEN_KOYO}}"`,
+		"idempotence vérifiée",
+	)
+	koyo := f.appByName("waf-koyo-1")
+	if koyo.env("UPSTREAM") != nil || koyo.env("WAF_DETECTION_UNTIL") == nil {
+		t.Fatalf("variables : UPSTREAM=%v WAF_DETECTION_UNTIL=%v", koyo.env("UPSTREAM"), koyo.env("WAF_DETECTION_UNTIL"))
+	}
+}
+
+func TestCleEquipeIllisible(t *testing.T) {
+	for _, tc := range []struct {
+		name, cause    string
+		locked, hidden bool
+	}{
+		{"verrouillée", "variable verrouillée", true, false},
+		{"sans read:sensitive", "jeton sans read:sensitive", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFake(t, testToken)
+			f.addShared("WAF_BASE", ptr(wafBaseLiteral))
+			f.addShared("UPSTREAM_KOYO", ptr("https://koyo.koyeb.app"))
+			s := f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+			s.Locked, s.Hidden = tc.locked, tc.hidden
+			out, err := run(t, srv.URL, testApps(t, "koyo"), true)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			mustContain(t, out,
+				`+ env ORIGIN_TOKEN = "{{team.ORIGIN_TOKEN_KOYO}}"`,
+				"valeur de ORIGIN_TOKEN_KOYO illisible ("+tc.cause+") : non vérifiée",
+				"idempotence vérifiée",
+			)
+			if strings.Contains(out, "action ops") {
+				t.Fatalf("action ops sur une clé illisible :\n%s", out)
+			}
+		})
+	}
+}
+
+func TestValeurEnPlaceGardee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	a.setEnv(f, "WAF_UNINSPECTED_PATHS", nil, false, true)
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "env WAF_UNINSPECTED_PATHS") {
+		t.Fatalf("référence inutilisable posée :\n%s", out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+	if e := a.env("WAF_UNINSPECTED_PATHS"); e == nil || e.Value != nil {
+		t.Fatalf("WAF_UNINSPECTED_PATHS : %+v", e)
+	}
 }

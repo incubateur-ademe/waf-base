@@ -25,7 +25,6 @@ type API interface {
 	UpdateApplication(ctx context.Context, uuid string, body map[string]any) error
 	ListApplicationEnvs(ctx context.Context, uuid string) ([]coolify.Env, error)
 	UpsertApplicationEnvs(ctx context.Context, uuid string, envs []coolify.EnvWrite) error
-	DeleteApplicationEnv(ctx context.Context, uuid, envUUID string) error
 	ListTeamEnvs(ctx context.Context) ([]coolify.SharedEnv, error)
 }
 
@@ -110,6 +109,24 @@ type envWant struct {
 
 func Ref(key string) string { return "{{team." + key + "}}" }
 
+// failure dit ce que provoque la variable manquante : WAF_BASE, seule variable
+// de build, casse le build ; les autres font refuser le démarrage à wafgen run.
+func (w envWant) failure() (would, does string) {
+	if w.buildtime {
+		return "le build échouerait", "le build échoue"
+	}
+	return "wafgen run refuserait de démarrer", "wafgen run refuse de démarrer"
+}
+
+// baseShared renvoie la clé d'équipe quand BaseRef n'est qu'une référence d'équipe.
+func baseShared(cfg Config) string {
+	m := reTeamRef.FindStringSubmatch(cfg.BaseRef)
+	if m == nil || m[0] != strings.TrimSpace(cfg.BaseRef) {
+		return ""
+	}
+	return m[1]
+}
+
 func wantEnvs(app inventory.App, cfg Config) []envWant {
 	sfx := app.EnvSuffix()
 	out := []envWant{
@@ -132,7 +149,11 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 			out[i].value = Ref(out[i].shared)
 		}
 	}
-	return append(out, envWant{key: "WAF_BASE", value: cfg.BaseRef, buildtime: true})
+	base := envWant{key: "WAF_BASE", value: cfg.BaseRef, buildtime: true}
+	if k := baseShared(cfg); k != "" {
+		base.shared, base.required = k, true
+	}
+	return append(out, base)
 }
 
 // ---------- plan
@@ -141,11 +162,9 @@ type Change struct {
 	Key, Old, New string
 }
 
-// EnvChange est une variable à écrire, ou à supprimer si Delete liste ses uuid.
 type EnvChange struct {
 	Key, Old, New string
 	Write         coolify.EnvWrite
-	Delete        []string
 }
 
 type AppPlan struct {
@@ -188,6 +207,7 @@ type shared struct {
 	exists bool
 	known  bool
 	empty  bool
+	locked bool
 }
 
 // filled dit si la clé existe et n'est pas connue vide. Une valeur illisible
@@ -199,10 +219,42 @@ func sharedState(m map[string]coolify.SharedEnv, key string) shared {
 	if !ok {
 		return shared{}
 	}
-	if !e.Value.Set || e.IsShownOnce {
+	if e.IsShownOnce {
+		return shared{exists: true, locked: true}
+	}
+	if !e.Value.Set {
 		return shared{exists: true}
 	}
 	return shared{exists: true, known: true, empty: e.Value.Null || strings.TrimSpace(e.Value.Value) == ""}
+}
+
+func (s shared) state() string {
+	switch {
+	case !s.exists:
+		return "absente"
+	case !s.known:
+		return "illisible"
+	case s.empty:
+		return "vide"
+	}
+	return "remplie"
+}
+
+// opsAction est le geste ops qui rend la clé utilisable : la créer si elle est
+// absente, la remplir si elle existe vide (l'UI refuse de recréer une clé existante).
+func (s shared) opsAction(key string) string {
+	if s.exists {
+		return fmt.Sprintf("action ops : remplir %s dans l'UI Coolify (variables partagées de l'équipe)", key)
+	}
+	return fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (variables partagées de l'équipe)", key)
+}
+
+func (s shared) unreadable(key string) string {
+	cause := "jeton sans read:sensitive"
+	if s.locked {
+		cause = "variable verrouillée"
+	}
+	return fmt.Sprintf("valeur de %s illisible (%s) : non vérifiée", key, cause)
 }
 
 func lookup(app coolify.Application, path string) any {
@@ -380,9 +432,11 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 	for _, e := range teamList {
 		team[e.Key] = e
 	}
-	for _, m := range reTeamRef.FindAllStringSubmatch(cfg.BaseRef, -1) {
-		if !sharedState(team, m[1]).filled() {
-			p.Notes = append(p.Notes, fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; sans elle, tout build échoue", m[1]))
+	if baseShared(cfg) == "" {
+		for _, m := range reTeamRef.FindAllStringSubmatch(cfg.BaseRef, -1) {
+			if st := sharedState(team, m[1]); !st.filled() {
+				p.Notes = append(p.Notes, st.opsAction(m[1])+", puis relancer provision ; sans elle, tout build échoue")
+			}
 		}
 	}
 	list, err := api.ListApplications(ctx)
@@ -421,7 +475,6 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		}
 	}
 	current := map[string]coolify.Env{}
-	previews := map[string][]string{}
 	if ap.UUID == "" {
 		ap.Create = true
 		for _, f := range wantFields(app) {
@@ -443,7 +496,6 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		}
 		for _, e := range envs {
 			if e.IsPreview {
-				previews[e.Key] = append(previews[e.Key], e.UUID)
 				continue
 			}
 			if _, dup := current[e.Key]; dup {
@@ -468,6 +520,8 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		}
 		old := envValue(e)
 		valueOK := ok && sameValue(old, value)
+		refInPlace := valueOK
+		would, does := w.failure()
 		// Une référence ne se pose que si sa clé d'équipe est utilisable : une
 		// optionnelle si elle existe, une requise si elle est en plus remplie.
 		refOK := w.shared == "" || st.exists && (!w.required || st.filled())
@@ -479,27 +533,34 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 			if st.known && !st.empty {
 				ap.Notes = append(ap.Notes, fmt.Sprintf("%s : valeur littérale remplacée par %s, remplie", w.key, value))
 			} else {
-				ap.Notes = append(ap.Notes, fmt.Sprintf("%s : valeur littérale %s conservée, %s étant absente, vide ou illisible", w.key, showEnv(w.key, old), w.shared))
+				ap.Notes = append(ap.Notes, fmt.Sprintf("%s : valeur littérale %s conservée, %s étant %s", w.key, showEnv(w.key, old), w.shared, st.state()))
 				valueOK, literalKept = true, true
 			}
 		}
 		if w.shared != "" && ok && !st.exists && orphan(old, team) {
 			if !w.required {
-				uuids := append([]string{e.UUID}, previews[w.key]...)
-				ap.Envs = append(ap.Envs, EnvChange{Key: w.key, Old: showEnv(w.key, old), Delete: uuids})
-				ap.Notes = append(ap.Notes, fmt.Sprintf("%s : référence orpheline, wafgen run refuserait de démarrer ; supprimée de l'app, %s étant absente", w.key, w.shared))
+				// Vidée par le bulk plutôt que supprimée : le jeton SecOps n'a pas
+				// l'ability delete. Coolify stocke null, que wafgen run lit comme absente.
+				empty := ""
+				ap.Envs = append(ap.Envs, EnvChange{Key: w.key, Old: showEnv(w.key, old), New: strconv.Quote(empty),
+					Write: coolify.EnvWrite{Key: w.key, Value: &empty, IsRuntime: true}})
+				ap.Notes = append(ap.Notes, fmt.Sprintf("%s : référence orpheline, %s ; vidée, %s étant absente", w.key, would, w.shared))
 				continue
 			}
-			ap.Notes = append(ap.Notes, fmt.Sprintf("%s : référence orpheline, wafgen run refuserait de démarrer", w.key))
+			ap.Notes = append(ap.Notes, fmt.Sprintf("%s : référence orpheline, %s", w.key, would))
 		}
 		if w.required {
 			switch {
 			case !st.filled() && literalKept:
-				ap.Notes = append(ap.Notes, fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision pour remplacer la valeur littérale", w.shared))
+				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis relancer provision pour remplacer la valeur littérale")
+			case !st.filled() && !ok:
+				ap.Notes = append(ap.Notes, fmt.Sprintf("%s, puis relancer provision ; d'ici là %s n'est pas posée et %s", st.opsAction(w.shared), w.key, does))
+			case !st.filled() && refInPlace:
+				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis redéployer l'app")
 			case !st.filled():
-				ap.Notes = append(ap.Notes, fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là %s n'est pas posée et wafgen run refuse de démarrer", w.shared, w.key))
+				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis relancer provision")
 			case !st.known:
-				ap.Notes = append(ap.Notes, fmt.Sprintf("valeur de %s illisible (variable verrouillée) : non vérifiée", w.shared))
+				ap.Notes = append(ap.Notes, st.unreadable(w.shared))
 			}
 		}
 		if !refOK && !valueOK {
@@ -601,21 +662,11 @@ func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
 			}
 		}
 		var ws []coolify.EnvWrite
-		var dels []string
 		for _, e := range ap.Envs {
-			if e.Delete != nil {
-				dels = append(dels, e.Delete...)
-			} else {
-				ws = append(ws, e.Write)
-			}
+			ws = append(ws, e.Write)
 		}
 		if len(ws) > 0 {
 			if err := api.UpsertApplicationEnvs(ctx, ap.UUID, ws); err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, err)
-			}
-		}
-		for _, u := range dels {
-			if err := api.DeleteApplicationEnv(ctx, ap.UUID, u); err != nil {
 				return fmt.Errorf("%s : %w", ap.Name, err)
 			}
 		}
@@ -646,9 +697,7 @@ func Print(w io.Writer, p *Plan) {
 			fmt.Fprintf(w, "\n%s (%s) : conforme\n", a.Name, a.UUID)
 		}
 		for _, e := range a.Envs {
-			if e.Delete != nil {
-				fmt.Fprintf(w, "  - env %s = %s\n", e.Key, e.Old)
-			} else if e.Old == "(absente)" {
+			if e.Old == "(absente)" {
 				fmt.Fprintf(w, "  + env %s = %s\n", e.Key, e.New)
 			} else {
 				fmt.Fprintf(w, "  ~ env %s : %s -> %s\n", e.Key, e.Old, e.New)
