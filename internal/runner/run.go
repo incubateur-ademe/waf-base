@@ -437,8 +437,9 @@ func waitListen(addrs []string, max time.Duration, exited chan error) error {
 	return nil
 }
 
-// Signature de la page 403 du routeur Scalingo, à confirmer sur une app réelle à l'étape 2.
-var scalingoRefusal = regexp.MustCompile(`(?i)scalingo`)
+// Titre de la page 403 du firewall applicatif Scalingo, relevé sur osc-fr1 le 2026-11-13. Un 403 de l'app
+// elle-même peut citer Scalingo dans son corps. Seul le titre distingue le refus du routeur.
+var scalingoRefusal = regexp.MustCompile(`(?is)<title>\s*Access denied - Scalingo\s*</title>`)
 
 func originCheck(in *render.Input, logf func(string, ...any)) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
