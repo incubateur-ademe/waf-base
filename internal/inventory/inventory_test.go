@@ -180,6 +180,7 @@ func TestErreurs(t *testing.T) {
 		{"canonical hors des hosts", app("    canonical: www.a.example.org\n"), "canonical"},
 		{"canonical d'une autre app", app("") + "  app-b:\n    repo: incubateur-ademe/b\n    platform: scalingo\n    hosts: [b.example.org]\n    canonical: a.example.org\n", "canonical"},
 		{"canonical en majuscules", base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n    canonical: A.example.org\n", "canonical"},
+		{"canonical dans defaults", strings.Replace(app(""), "defaults:\n", "defaults:\n  canonical: a.example.org\n", 1), "canonical propre à une app, interdit dans defaults"},
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {

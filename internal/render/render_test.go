@@ -1,13 +1,21 @@
 package render
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/incubateur-ademe/waf-base/internal/tenant"
 )
 
@@ -121,6 +129,7 @@ func TestCanonicalRedirection(t *testing.T) {
 			var redir struct {
 				Match []struct {
 					Host []string `json:"host"`
+					Path []string `json:"path"`
 				} `json:"match"`
 				Handle []struct {
 					StatusCode int                 `json:"status_code"`
@@ -134,9 +143,118 @@ func TestCanonicalRedirection(t *testing.T) {
 			if len(redir.Match) != 1 || slices.Contains(hosts, "tacct.ademe.fr") || len(hosts) != 3 {
 				t.Fatalf("hosts redirigés = %v, attendu les 3 autres hosts", hosts)
 			}
+			if !reflect.DeepEqual(redir.Match[0].Path, []string{"/*"}) {
+				t.Fatalf("chemins redirigés = %v, attendu [/*] dans le jeu du host", redir.Match[0].Path)
+			}
 			h := redir.Handle[0]
-			if h.StatusCode != 301 || !reflect.DeepEqual(h.Headers["Location"], []string{"https://tacct.ademe.fr{http.request.uri}"}) {
+			headers := map[string][]string{
+				"Location":      {"https://tacct.ademe.fr{http.request.uri}"},
+				"Cache-Control": {"max-age=86400"},
+			}
+			if h.StatusCode != 301 || !reflect.DeepEqual(h.Headers, headers) {
 				t.Fatalf("redirection : %+v", h)
+			}
+		})
+	}
+}
+
+func TestCanonicalCibleOpaque(t *testing.T) {
+	inner := innerRoutes(t, testInput(tacctHosts, "tacct.ademe.fr", "visitor"))
+	b, err := json.Marshal(inner[4]["match"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sets []map[string]json.RawMessage
+	if err := json.Unmarshal(b, &sets); err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || len(sets[0]) != 2 {
+		t.Fatalf("matcher de la 301 : %s, attendu un seul jeu host et path", b)
+	}
+	var host caddyhttp.MatchHost
+	var path caddyhttp.MatchPath
+	if err := json.Unmarshal(sets[0]["host"], &host); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(sets[0]["path"], &path); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Provision(caddy.Context{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := path.Provision(caddy.Context{}); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		cible    string
+		redirige bool
+	}{
+		{"/", true},
+		{"/a/b?x=1&y=2", true},
+		{"//evil.com/", true},
+		{"a:@evil.com", false},
+		{"mailto:x@evil.com", false},
+		{"*", false},
+	}
+	for _, c := range cases {
+		t.Run(c.cible, func(t *testing.T) {
+			r, err := http.ReadRequest(bufio.NewReader(strings.NewReader("GET " + c.cible + " HTTP/1.1\r\nHost: www.tacct.ademe.fr\r\n\r\n")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r = r.WithContext(context.WithValue(r.Context(), caddy.ReplacerCtxKey, caddy.NewReplacer()))
+			if h, err := host.MatchWithError(r); err != nil || !h {
+				t.Fatalf("host www.tacct.ademe.fr non reconnu : %v", err)
+			}
+			p, err := path.MatchWithError(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p != c.redirige {
+				t.Fatalf("GET %s sur www.tacct.ademe.fr : redirection %v, attendu %v", c.cible, p, c.redirige)
+			}
+		})
+	}
+}
+
+// Les rendus de testdata datent d'avant la redirection canonique. Une app sans
+// canonical garde la même conf Caddy, à l'octet près.
+func TestRenduSansCanonicalInchange(t *testing.T) {
+	base, err := os.ReadFile("testdata/base.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ app, waf string }{
+		{"pilote", filepath.Join(t.TempDir(), "waf.yaml")},
+		{"tacct", "testdata/tacct.waf.yaml"},
+	}
+	for _, c := range cases {
+		t.Run(c.app, func(t *testing.T) {
+			b, err := os.ReadFile("testdata/" + c.app + ".entree.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var in Input
+			if err := json.Unmarshal(b, &in); err != nil {
+				t.Fatal(err)
+			}
+			if in.WAF, err = tenant.Load(c.waf, 100); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Caddy(base, &in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile("testdata/" + c.app + ".json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				i := 0
+				for i < len(got) && i < len(want) && got[i] == want[i] {
+					i++
+				}
+				t.Fatalf("rendu différent de testdata/%s.json à l'octet %d : %q", c.app, i, got[i:min(i+120, len(got))])
 			}
 		})
 	}

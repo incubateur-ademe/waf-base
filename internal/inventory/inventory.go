@@ -119,6 +119,9 @@ func Parse(b []byte, platforms map[string]bool) ([]App, error) {
 	if len(f.Apps) == 0 {
 		return nil, fmt.Errorf("inventaire : aucune app")
 	}
+	if f.Defaults.Canonical != nil {
+		return nil, fmt.Errorf("inventaire : canonical propre à une app, interdit dans defaults")
+	}
 	names := make([]string, 0, len(f.Apps))
 	for n := range f.Apps {
 		names = append(names, n)
@@ -158,7 +161,7 @@ func merge(name string, def, e entry) App {
 		Name:           name,
 		Repo:           pick(e.Repo, def.Repo, ""),
 		Platform:       pick(e.Platform, def.Platform, ""),
-		Canonical:      pick(e.Canonical, def.Canonical, ""),
+		Canonical:      pick(e.Canonical, nil, ""),
 		HostHeader:     pick(e.HostHeader, def.HostHeader, "visitor"),
 		CRSPlugins:     pick(e.CRSPlugins, def.CRSPlugins, nil),
 		Live:           pick(e.Live, def.Live, false),

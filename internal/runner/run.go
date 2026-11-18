@@ -453,6 +453,9 @@ func originCheck(in *render.Input, logf func(string, ...any)) error {
 	req, _ := http.NewRequestWithContext(ctx, "GET", in.Upstream+"/", nil)
 	if in.HostHeader == "visitor" {
 		req.Host = in.Hosts[0]
+		if in.Canonical != "" {
+			req.Host = in.Canonical
+		}
 	}
 	req.Header.Set("User-Agent", "wafgen-origin-check")
 	if in.Platform == "koyeb" {

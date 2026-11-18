@@ -1,0 +1,1 @@
+{"Etc":"/etc/waf","State":"/var/lib/waf","Tenant":"waf-pilote","Hosts":["waf-pilote.incubateur.ademe.dev"],"HostHeader":"visitor","Platform":"scalingo","Upstream":"https://waf-pilote.osc-fr1.scalingo.io","CRSPlugins":[],"Revision":"0123456789ab","Base":"ghcr.io/incubateur-ademe/waf-base@sha256:f4bc","TenantFiles":{},"Now":"2026-11-18T12:00:00Z"}

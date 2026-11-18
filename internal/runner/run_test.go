@@ -43,15 +43,8 @@ func TestOriginCheck(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {
-			var host string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				host = r.Host
-				w.WriteHeader(c.status)
-				_, _ = w.Write([]byte(c.corps))
-			}))
-			defer srv.Close()
-			in := &render.Input{Upstream: srv.URL, Platform: c.platform, HostHeader: "visitor", Hosts: []string{"site.example.org"}}
-			err := originCheck(in, func(string, ...any) {})
+			in := &render.Input{Platform: c.platform, HostHeader: "visitor", Hosts: []string{"site.example.org"}}
+			host, err := hostVuParOrigine(in, c.status, c.corps)
 			if (err != nil) != c.erreur {
 				t.Fatalf("erreur = %v, attendu une erreur : %v", err, c.erreur)
 			}
@@ -60,6 +53,29 @@ func TestOriginCheck(t *testing.T) {
 			}
 		})
 	}
+	t.Run("canonical autre que le premier host", func(t *testing.T) {
+		in := &render.Input{Platform: "scalingo", HostHeader: "visitor", Hosts: []string{"www.site.example.org", "site.example.org"}, Canonical: "site.example.org"}
+		host, err := hostVuParOrigine(in, 200, "ok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host != "site.example.org" {
+			t.Fatalf("Host envoyé à l'origine = %q, attendu le canonique", host)
+		}
+	})
+}
+
+func hostVuParOrigine(in *render.Input, status int, corps string) (string, error) {
+	var host string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host = r.Host
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(corps))
+	}))
+	defer srv.Close()
+	in.Upstream = srv.URL
+	err := originCheck(in, func(string, ...any) {})
+	return host, err
 }
 
 func TestInputsCanonical(t *testing.T) {

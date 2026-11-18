@@ -257,7 +257,6 @@ func reverseProxy(in *Input) (obj, error) {
 	}, nil
 }
 
-// otherHosts renvoie les hosts redirigés vers Canonical, aucun sans Canonical.
 func otherHosts(in *Input) []string {
 	if in.Canonical == "" {
 		return nil
@@ -310,13 +309,21 @@ func SiteRoute(in *Input) (obj, error) {
 	waf := obj{"handler": "waf", "load_owasp_crs": false, "directives": Directives(in)}
 	encode := obj{"handler": "encode", "encodings": obj{"zstd": obj{}, "gzip": obj{}}, "prefer": []string{"zstd", "gzip"}}
 	if others := otherHosts(in); len(others) > 0 {
+		redirect := obj{"handler": "static_response", "status_code": 301, "headers": obj{
+			"Location": []string{"https://" + in.Canonical + "{http.request.uri}"},
+			// Les navigateurs gardent un 301 sans durée indéfiniment. Borné à un
+			// jour, le canonique reste inversable.
+			"Cache-Control": []string{"max-age=86400"},
+		}}
 		// Redirection après Coraza : une attaque sur un host non canonique prend
 		// 403, comme l'autotest de wafgen run l'attend sur chaque host.
 		inner = append(inner,
 			obj{"handle": []any{waf}},
 			obj{
-				"match":  []any{obj{"host": others}},
-				"handle": []any{obj{"handler": "static_response", "status_code": 301, "headers": obj{"Location": []string{"https://" + in.Canonical + "{http.request.uri}"}}}},
+				// Une cible opaque (GET a:@evil.com) n'a pas de / initial. Collée
+				// derrière le canonique, elle changerait l'autorité de la Location.
+				"match":  []any{obj{"host": others, "path": []string{"/*"}}},
+				"handle": []any{redirect},
 			},
 			obj{"handle": []any{encode, rp}},
 		)
