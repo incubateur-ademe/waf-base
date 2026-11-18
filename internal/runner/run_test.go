@@ -3,8 +3,13 @@ package runner
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/incubateur-ademe/waf-base/internal/policy"
 	"github.com/incubateur-ademe/waf-base/internal/render"
 )
 
@@ -52,6 +57,56 @@ func TestOriginCheck(t *testing.T) {
 			}
 			if host != "site.example.org" {
 				t.Fatalf("Host envoyé à l'origine = %q, attendu le host du visiteur", host)
+			}
+		})
+	}
+}
+
+func TestInputsCanonical(t *testing.T) {
+	pol, err := policy.Load("../../policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Paths{Etc: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(p.Etc, "tenant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		nom, valeur, attendu, erreur string
+		absente                      bool
+	}{
+		{nom: "absente", absente: true},
+		{nom: "vide, null côté Coolify", valeur: ""},
+		{nom: "un des hosts", valeur: "www.tacct.ademe.fr", attendu: "www.tacct.ademe.fr"},
+		{nom: "espaces autour", valeur: " tacct.ademe.fr ", attendu: "tacct.ademe.fr"},
+		{nom: "hors des hosts", valeur: "autre.ademe.fr", erreur: "WAF_CANONICAL_HOST"},
+		{nom: "suffixe d'un host", valeur: "ademe.fr", erreur: "WAF_CANONICAL_HOST"},
+	}
+	for _, c := range cases {
+		t.Run(c.nom, func(t *testing.T) {
+			for k, v := range map[string]string{
+				"WAF_TENANT": "tacct", "WAF_HOSTS": "tacct.ademe.fr,www.tacct.ademe.fr",
+				"UPSTREAM": "https://tacct.osc-fr1.scalingo.io", "WAF_PLATFORM": "scalingo", "WAF_HOST_HEADER": "upstream",
+				"WAF_CEILINGS": "", "WAF_CRS_PLUGINS": "", "WAF_DETECTION_UNTIL": "", "WAF_FORCE_DETECTION": "",
+				"WAF_UNINSPECTED_PATHS": "", "WAF_CANONICAL_HOST": c.valeur,
+			} {
+				t.Setenv(k, v)
+			}
+			if c.absente {
+				os.Unsetenv("WAF_CANONICAL_HOST")
+			}
+			in, err := Inputs(p, pol, nil, time.Now())
+			if c.erreur != "" {
+				if err == nil || !strings.Contains(err.Error(), c.erreur) {
+					t.Fatalf("erreur = %v, attendu %q", err, c.erreur)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in.Canonical != c.attendu {
+				t.Fatalf("Canonical = %q, attendu %q", in.Canonical, c.attendu)
 			}
 		})
 	}

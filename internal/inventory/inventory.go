@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +42,7 @@ type entry struct {
 	Repo           *string    `yaml:"repo"`
 	Platform       *string    `yaml:"platform"`
 	Hosts          []string   `yaml:"hosts"`
+	Canonical      *string    `yaml:"canonical"`
 	HostHeader     *string    `yaml:"host_header"`
 	CRSPlugins     *[]string  `yaml:"crs_plugins"`
 	Live           *bool      `yaml:"live"`
@@ -73,6 +75,7 @@ type App struct {
 	Repo           string
 	Platform       string
 	Hosts          []string
+	Canonical      string
 	HostHeader     string
 	CRSPlugins     []string
 	Live           bool
@@ -155,6 +158,7 @@ func merge(name string, def, e entry) App {
 		Name:           name,
 		Repo:           pick(e.Repo, def.Repo, ""),
 		Platform:       pick(e.Platform, def.Platform, ""),
+		Canonical:      pick(e.Canonical, def.Canonical, ""),
 		HostHeader:     pick(e.HostHeader, def.HostHeader, "visitor"),
 		CRSPlugins:     pick(e.CRSPlugins, def.CRSPlugins, nil),
 		Live:           pick(e.Live, def.Live, false),
@@ -198,6 +202,9 @@ func validate(a App, platforms map[string]bool) ([]string, error) {
 	hosts, err := validateHosts(a.Hosts)
 	if err != nil {
 		return nil, err
+	}
+	if a.Canonical != "" && !slices.Contains(hosts, a.Canonical) {
+		return nil, fmt.Errorf("canonical %q absent des hosts de l'app", a.Canonical)
 	}
 	return hosts, validateRest(a, platforms)
 }

@@ -12,6 +12,7 @@ Le design est dans le dossier finops (`waf-coraza-design.md`, sections 5 à 8).
 - `crs/` : version et SHA-256 de la CRS 4.25.2 LTS, téléchargée et vérifiée au build.
 - `policy/` : règles excluables, formes SecLang admises, origines par plateforme, schéma de `waf.yaml`.
 - `lint/` : action appelée par les repos des startups, et modèle de workflow.
+- `inventaire.yaml` : apps protégées, lu par `wafgen provision`. `canonical: <host>`, optionnel, redirige en 301 les autres hosts de l'app vers ce host, après le rate limit et Coraza (`WAF_CANONICAL_HOST`).
 - `tests/exemple-tacct/` : le `waf/` d'exemple de la section 6 ; `tests/e2e/run.sh` : test de bout en bout local (Traefik, WAF, origine HTTPS factice).
 
 ## Le waf/ d'une app

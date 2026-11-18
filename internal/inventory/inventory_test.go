@@ -42,6 +42,9 @@ func TestInventaireDuRepo(t *testing.T) {
 	if apps[0].HostHeader != "upstream" || apps[0].Live {
 		t.Fatalf("valeurs de tacct : %+v", apps[0])
 	}
+	if apps[0].Canonical != "" || p.Canonical != "" {
+		t.Fatalf("canonical sans valeur dans l'inventaire : %q, %q", apps[0].Canonical, p.Canonical)
+	}
 	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
 	if got := p.Ceilings.Env(); got != want {
 		t.Fatalf("WAF_CEILINGS = %q, attendu %q", got, want)
@@ -129,6 +132,27 @@ apps:
 	}
 }
 
+func TestCanonical(t *testing.T) {
+	y := base + `
+  app-a:
+    repo: incubateur-ademe/a
+    platform: scalingo
+    hosts: [a.example.org, www.a.example.org]
+    canonical: a.example.org
+  app-b:
+    repo: incubateur-ademe/b
+    platform: scalingo
+    hosts: [b.example.org, www.b.example.org]
+`
+	apps, err := Parse([]byte(y), platforms(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apps[0].Canonical != "a.example.org" || apps[1].Canonical != "" {
+		t.Fatalf("canonical : %q, %q", apps[0].Canonical, apps[1].Canonical)
+	}
+}
+
 func TestErreurs(t *testing.T) {
 	app := func(extra string) string {
 		return base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n" + extra
@@ -153,6 +177,9 @@ func TestErreurs(t *testing.T) {
 		{"waf_dir hors du repo", app("    waf_dir: ../secret\n"), "waf_dir"},
 		{"host_header", app("    host_header: origin\n"), "host_header"},
 		{"plugin", app("    crs_plugins: [../x]\n"), "crs_plugins"},
+		{"canonical hors des hosts", app("    canonical: www.a.example.org\n"), "canonical"},
+		{"canonical d'une autre app", app("") + "  app-b:\n    repo: incubateur-ademe/b\n    platform: scalingo\n    hosts: [b.example.org]\n    canonical: a.example.org\n", "canonical"},
+		{"canonical en majuscules", base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n    canonical: A.example.org\n", "canonical"},
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {

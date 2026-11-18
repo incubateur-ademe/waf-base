@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,10 @@ func Inputs(p Paths, pol *policy.Policy, lr *lint.Result, now time.Time) (*rende
 	hosts, err := render.ParseHosts(hostsRaw)
 	if err != nil {
 		return nil, err
+	}
+	canonical := strings.TrimSpace(os.Getenv("WAF_CANONICAL_HOST"))
+	if canonical != "" && !slices.Contains(hosts, canonical) {
+		return nil, fmt.Errorf("WAF_CANONICAL_HOST %q absent de WAF_HOSTS", canonical)
 	}
 	upstream, err := req("UPSTREAM")
 	if err != nil {
@@ -128,6 +133,7 @@ func Inputs(p Paths, pol *policy.Policy, lr *lint.Result, now time.Time) (*rende
 		State:          p.State,
 		Tenant:         name,
 		Hosts:          hosts,
+		Canonical:      canonical,
 		HostHeader:     hh,
 		Platform:       platform,
 		Upstream:       upstream,
