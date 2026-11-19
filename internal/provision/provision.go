@@ -149,6 +149,11 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 	if app.Platform == "koyeb" {
 		out = append(out, envWant{key: "ORIGIN_TOKEN", shared: "ORIGIN_TOKEN_" + sfx, required: true})
 	}
+	edgeSecret := envWant{key: "WAF_EDGE_SECRET", omitEmpty: true}
+	if app.Edge != "" {
+		edgeSecret.shared, edgeSecret.required = "EDGE_SECRET_"+sfx, true
+	}
+	out = append(out, envWant{key: "WAF_EDGE", value: app.Edge, omitEmpty: true}, edgeSecret)
 	for i := range out {
 		if out[i].shared != "" {
 			out[i].value = Ref(out[i].shared)
@@ -338,7 +343,7 @@ func fieldChanges(cur coolify.Application, app inventory.App, ghID int64) ([]Cha
 }
 
 func showEnv(key, v string) string {
-	if key == "ORIGIN_TOKEN" && !strings.Contains(v, "{{") && v != "" {
+	if (key == "ORIGIN_TOKEN" || key == "WAF_EDGE_SECRET") && !strings.Contains(v, "{{") && v != "" {
 		return "(valeur masquée)"
 	}
 	return strconv.Quote(v)

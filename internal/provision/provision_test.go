@@ -870,3 +870,152 @@ func TestCanonicalAbsenteNonCreee(t *testing.T) {
 		t.Fatalf("WAF_CANONICAL_HOST posée sans canonical :\n%s", out)
 	}
 }
+
+const edgeSecretFactice = "secret-edge-factice-0123456789abcdef-ABCDEF"
+
+func koyoEdge(t *testing.T) []inventory.App {
+	t.Helper()
+	y := strings.Replace(testInventory, "hosts: [koyo.example.org, www.koyo.example.org]\n",
+		"hosts: [koyo.example.org, www.koyo.example.org]\n    edge: cloudflare\n", 1)
+	apps, err := inventory.Parse([]byte(y), map[string]bool{"scalingo": true, "koyeb": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range apps {
+		if a.Name == "koyo" {
+			return []inventory.App{a}
+		}
+	}
+	t.Fatal("app koyo absente")
+	return nil
+}
+
+func noDelete(t *testing.T, f *fakeCoolify) {
+	t.Helper()
+	for _, w := range f.writes {
+		if strings.HasPrefix(w, "DELETE ") {
+			t.Fatalf("suppression demandée, le jeton SecOps n'a pas l'ability delete : %v", f.writes)
+		}
+	}
+}
+
+func TestEdgePoseeEtVidee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	f.addShared("WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"))
+	f.addShared("UPSTREAM_KOYO", ptr("https://koyo.koyeb.app"))
+	f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+	var outs []string
+
+	out, err := run(t, srv.URL, koyoEdge(t), true)
+	outs = append(outs, out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out,
+		`+ env WAF_EDGE = "cloudflare"`,
+		"action ops : créer EDGE_SECRET_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là WAF_EDGE_SECRET n'est pas posée et wafgen run refuse de démarrer",
+		"idempotence vérifiée",
+	)
+	a := f.appByName("waf-koyo-1")
+	if e := a.env("WAF_EDGE"); e == nil || e.Value == nil || *e.Value != "cloudflare" || e.Buildtime || !e.Runtime {
+		t.Fatalf("WAF_EDGE : %+v", e)
+	}
+	if e := a.env("WAF_EDGE_SECRET"); e != nil {
+		t.Fatalf("WAF_EDGE_SECRET créée sans sa variable d'équipe : %+v", e)
+	}
+
+	f.addShared("EDGE_SECRET_KOYO", ptr(edgeSecretFactice))
+	out, err = run(t, srv.URL, koyoEdge(t), true)
+	outs = append(outs, out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `+ env WAF_EDGE_SECRET = "{{team.EDGE_SECRET_KOYO}}"`, "idempotence vérifiée")
+	if e := a.env("WAF_EDGE_SECRET"); e == nil || e.Value == nil || *e.Value != "{{team.EDGE_SECRET_KOYO}}" || e.Buildtime || !e.Runtime {
+		t.Fatalf("WAF_EDGE_SECRET : %+v", e)
+	}
+
+	out, err = run(t, srv.URL, testApps(t, "koyo"), false)
+	outs = append(outs, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out,
+		`~ env WAF_EDGE : "cloudflare" -> ""`,
+		`~ env WAF_EDGE_SECRET : "{{team.EDGE_SECRET_KOYO}}" -> ""`,
+		"2 changement(s) prévu(s)",
+	)
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	outs = append(outs, out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+	for _, k := range []string{"WAF_EDGE", "WAF_EDGE_SECRET"} {
+		if e := a.env(k); e == nil || e.Value != nil {
+			t.Fatalf("%s non vidée : %+v", k, e)
+		}
+	}
+	noDelete(t, f)
+
+	n := len(f.writes)
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	outs = append(outs, out)
+	if err != nil || len(f.writes) != n {
+		t.Fatalf("passage sans edge : %v, %d écritures\n%s", err, len(f.writes)-n, out)
+	}
+	if strings.Contains(out, "WAF_EDGE") || strings.Contains(out, "EDGE_SECRET") {
+		t.Fatalf("variables d'edge vides encore citées :\n%s", out)
+	}
+	if v := f.shared("EDGE_SECRET_KOYO").Value; v == nil || *v != edgeSecretFactice {
+		t.Fatal("variable d'équipe modifiée")
+	}
+	for _, o := range outs {
+		if strings.Contains(o, edgeSecretFactice) {
+			t.Fatalf("secret d'edge dans la sortie :\n%s", o)
+		}
+	}
+}
+
+func TestEdgeAbsenteNonCreee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "EDGE") || a.env("WAF_EDGE") != nil || a.env("WAF_EDGE_SECRET") != nil {
+		t.Fatalf("variables d'edge posées sans edge :\n%s", out)
+	}
+}
+
+func TestEdgeSecretLitteralMasque(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := f.addApp("waf-koyo-1", "dest-waf", nil)
+	a.setEnv(f, "WAF_EDGE_SECRET", ptr(edgeSecretFactice), false, true)
+
+	out, err := run(t, srv.URL, koyoEdge(t), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "WAF_EDGE_SECRET : valeur littérale (valeur masquée) conservée, EDGE_SECRET_KOYO étant absente", "idempotence vérifiée")
+	if strings.Contains(out, edgeSecretFactice) {
+		t.Fatalf("secret littéral affiché :\n%s", out)
+	}
+	if e := a.env("WAF_EDGE_SECRET"); e.Value == nil || *e.Value != edgeSecretFactice {
+		t.Fatalf("WAF_EDGE_SECRET littérale modifiée : %+v", e)
+	}
+
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `~ env WAF_EDGE_SECRET : (valeur masquée) -> ""`, "idempotence vérifiée")
+	if strings.Contains(out, edgeSecretFactice) {
+		t.Fatalf("secret littéral affiché au retrait :\n%s", out)
+	}
+	if e := a.env("WAF_EDGE_SECRET"); e.Value != nil {
+		t.Fatalf("WAF_EDGE_SECRET non vidée : %+v", e)
+	}
+	noDelete(t, f)
+}

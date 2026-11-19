@@ -50,6 +50,11 @@ func TestInventaireDuRepo(t *testing.T) {
 	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "preprod.tacct.ademe.fr" || p.Canonical != "" {
 		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
 	}
+	for _, a := range apps {
+		if a.Edge != "" {
+			t.Fatalf("edge de %s : %q, absent de l'inventaire", a.Name, a.Edge)
+		}
+	}
 	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
 	if got := p.Ceilings.Env(); got != want {
 		t.Fatalf("WAF_CEILINGS = %q, attendu %q", got, want)
@@ -158,6 +163,27 @@ func TestCanonical(t *testing.T) {
 	}
 }
 
+func TestEdge(t *testing.T) {
+	y := base + `
+  app-a:
+    repo: incubateur-ademe/a
+    platform: scalingo
+    hosts: [a.example.org]
+    edge: cloudflare
+  app-b:
+    repo: incubateur-ademe/b
+    platform: scalingo
+    hosts: [b.example.org]
+`
+	apps, err := Parse([]byte(y), platforms(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apps[0].Edge != render.EdgeCloudflare || apps[1].Edge != "" {
+		t.Fatalf("edge : %q, %q", apps[0].Edge, apps[1].Edge)
+	}
+}
+
 func TestErreurs(t *testing.T) {
 	app := func(extra string) string {
 		return base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n" + extra
@@ -186,6 +212,9 @@ func TestErreurs(t *testing.T) {
 		{"canonical d'une autre app", app("") + "  app-b:\n    repo: incubateur-ademe/b\n    platform: scalingo\n    hosts: [b.example.org]\n    canonical: a.example.org\n", "canonical"},
 		{"canonical en majuscules", base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n    canonical: A.example.org\n", "canonical"},
 		{"canonical dans defaults", strings.Replace(app(""), "defaults:\n", "defaults:\n  canonical: a.example.org\n", 1), "canonical propre à une app, interdit dans defaults"},
+		{"edge inconnu", app("    edge: fastly\n"), `edge "fastly" : cloudflare seule valeur admise`},
+		{"edge en majuscules", app("    edge: Cloudflare\n"), "cloudflare seule valeur admise"},
+		{"edge dans defaults", strings.Replace(app("    edge: cloudflare\n"), "defaults:\n", "defaults:\n  edge: cloudflare\n", 1), "edge propre à une app, interdit dans defaults"},
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {
