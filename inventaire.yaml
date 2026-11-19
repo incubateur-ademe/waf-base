@@ -22,6 +22,7 @@ apps:
     platform: scalingo
     hosts: [tacct.incubateur.ademe.dev, facili-tacct.incubateur.ademe.dev, preprod.tacct.ademe.fr]
     canonical: preprod.tacct.ademe.fr
+    edge: cloudflare
     host_header: upstream
     crs_plugins: []
     live: true

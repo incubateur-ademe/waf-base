@@ -50,10 +50,8 @@ func TestInventaireDuRepo(t *testing.T) {
 	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "preprod.tacct.ademe.fr" || p.Canonical != "" {
 		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
 	}
-	for _, a := range apps {
-		if a.Edge != "" {
-			t.Fatalf("edge de %s : %q, absent de l'inventaire", a.Name, a.Edge)
-		}
+	if apps[0].Edge != "" || apps[1].Edge != "cloudflare" || apps[2].Edge != "" {
+		t.Fatalf("edge : tacct %q, tacct-preprod %q, waf-pilote %q", apps[0].Edge, apps[1].Edge, apps[2].Edge)
 	}
 	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
 	if got := p.Ceilings.Env(); got != want {
