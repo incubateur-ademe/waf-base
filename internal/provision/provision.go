@@ -59,7 +59,10 @@ func Domains(app inventory.App) []string {
 		if app.Live {
 			out = append(out, "https://"+h)
 		} else {
-			out = append(out, "http://"+h+":8080")
+			// Sans port : Coolify 4.7.5 retire :8080 du fqdn, à la création comme au
+			// PATCH, et route vers ports_exposes (8080). Avec le port, le plan ne
+			// convergeait jamais.
+			out = append(out, "http://"+h)
 		}
 	}
 	return out

@@ -123,7 +123,7 @@ func TestNommage(t *testing.T) {
 	if got := ResourceName(apps[1], "1"); got != "waf-waf-pilote-1" {
 		t.Fatalf("nom = %q", got)
 	}
-	if got := Domains(apps[0]); strings.Join(got, ",") != "http://koyo.example.org:8080,http://www.koyo.example.org:8080" {
+	if got := Domains(apps[0]); strings.Join(got, ",") != "http://koyo.example.org,http://www.koyo.example.org" {
 		t.Fatalf("domaines avant mise en service = %v", got)
 	}
 	if got := Domains(apps[1]); strings.Join(got, ",") != "https://waf-pilote.incubateur.ademe.dev" {
@@ -159,7 +159,7 @@ func TestCreation(t *testing.T) {
 	}
 	mustContain(t, out,
 		"waf-koyo-1 : création", "waf-waf-pilote-1 : création",
-		"domains = http://koyo.example.org:8080,http://www.koyo.example.org:8080",
+		"domains = http://koyo.example.org,http://www.koyo.example.org",
 		"+ env WAF_DETECTION_UNTIL = \"{{team.DETECTION_UNTIL_KOYO}}\"",
 		"action ops : créer UPSTREAM_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là UPSTREAM n'est pas posée",
 		"action ops : créer ORIGIN_TOKEN_KOYO avec sa valeur dans l'UI Coolify",
