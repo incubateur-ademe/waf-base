@@ -14,6 +14,7 @@ apps:
     platform: scalingo
     hosts: [tacct.ademe.fr, www.tacct.ademe.fr, facili-tacct.beta.gouv.fr, www.facili-tacct.beta.gouv.fr]
     canonical: tacct.ademe.fr
+    edge: cloudflare
     host_header: upstream
     crs_plugins: []
     live: false
