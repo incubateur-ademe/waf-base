@@ -12,6 +12,15 @@ apps:
     repo: incubateur-ademe/tacct
     platform: scalingo
     hosts: [tacct.ademe.fr, www.tacct.ademe.fr, facili-tacct.beta.gouv.fr, www.facili-tacct.beta.gouv.fr]
+    canonical: tacct.ademe.fr
+    host_header: upstream
+    crs_plugins: []
+    live: false
+  tacct-preprod:
+    repo: incubateur-ademe/tacct
+    platform: scalingo
+    hosts: [tacct.incubateur.ademe.dev, facili-tacct.incubateur.ademe.dev]
+    canonical: tacct.incubateur.ademe.dev
     host_header: upstream
     crs_plugins: []
     live: false

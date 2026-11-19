@@ -32,18 +32,20 @@ func TestInventaireDuRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(apps) != 2 || apps[0].Name != "tacct" || apps[1].Name != "waf-pilote" {
+	if len(apps) != 3 || apps[0].Name != "tacct" || apps[1].Name != "tacct-preprod" || apps[2].Name != "waf-pilote" {
 		t.Fatalf("apps = %+v", apps)
 	}
-	p := apps[1]
+	p := apps[2]
 	if p.Branch != "main" || p.WafDir != "waf" || p.Memory != "512M" || p.CPUWeight != 64 || !p.Live || p.HostHeader != "visitor" {
 		t.Fatalf("défauts mal fusionnés : %+v", p)
 	}
-	if apps[0].HostHeader != "upstream" || apps[0].Live {
-		t.Fatalf("valeurs de tacct : %+v", apps[0])
+	for _, a := range apps[:2] {
+		if a.HostHeader != "upstream" || a.Live || a.Repo != "incubateur-ademe/tacct" {
+			t.Fatalf("valeurs de %s : %+v", a.Name, a)
+		}
 	}
-	if apps[0].Canonical != "" || p.Canonical != "" {
-		t.Fatalf("canonical sans valeur dans l'inventaire : %q, %q", apps[0].Canonical, p.Canonical)
+	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "tacct.incubateur.ademe.dev" || p.Canonical != "" {
+		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
 	}
 	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
 	if got := p.Ceilings.Env(); got != want {
