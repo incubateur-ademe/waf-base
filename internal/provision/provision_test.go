@@ -912,16 +912,18 @@ func TestEdgePoseeEtVidee(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	mustContain(t, out,
-		`+ env WAF_EDGE = "cloudflare"`,
-		"action ops : créer EDGE_SECRET_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là WAF_EDGE_SECRET n'est pas posée et wafgen run refuse de démarrer",
+		"action ops : créer EDGE_SECRET_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là WAF_EDGE_SECRET n'est pas posée et le WAF garde l'IP vue par Traefik",
+		"WAF_EDGE retenue tant que EDGE_SECRET_KOYO n'est pas remplie",
 		"idempotence vérifiée",
 	)
-	a := f.appByName("waf-koyo-1")
-	if e := a.env("WAF_EDGE"); e == nil || e.Value == nil || *e.Value != "cloudflare" || e.Buildtime || !e.Runtime {
-		t.Fatalf("WAF_EDGE : %+v", e)
+	if strings.Contains(out, "env WAF_EDGE") || strings.Contains(out, "refuse de démarrer") {
+		t.Fatalf("WAF_EDGE posée sans secret, ou démarrage refusé annoncé :\n%s", out)
 	}
-	if e := a.env("WAF_EDGE_SECRET"); e != nil {
-		t.Fatalf("WAF_EDGE_SECRET créée sans sa variable d'équipe : %+v", e)
+	a := f.appByName("waf-koyo-1")
+	for _, k := range []string{"WAF_EDGE", "WAF_EDGE_SECRET"} {
+		if e := a.env(k); e != nil {
+			t.Fatalf("%s créée sans la variable d'équipe : %+v", k, e)
+		}
 	}
 
 	f.addShared("EDGE_SECRET_KOYO", ptr(edgeSecretFactice))
@@ -930,9 +932,19 @@ func TestEdgePoseeEtVidee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustContain(t, out, `+ env WAF_EDGE_SECRET = "{{team.EDGE_SECRET_KOYO}}"`, "idempotence vérifiée")
+	mustContain(t, out,
+		`+ env WAF_EDGE_SECRET = "{{team.EDGE_SECRET_KOYO}}"`,
+		`+ env WAF_EDGE = "cloudflare"`,
+		"idempotence vérifiée",
+	)
+	if strings.Contains(out, "retenue") {
+		t.Fatalf("WAF_EDGE encore retenue avec le secret rempli :\n%s", out)
+	}
 	if e := a.env("WAF_EDGE_SECRET"); e == nil || e.Value == nil || *e.Value != "{{team.EDGE_SECRET_KOYO}}" || e.Buildtime || !e.Runtime {
 		t.Fatalf("WAF_EDGE_SECRET : %+v", e)
+	}
+	if e := a.env("WAF_EDGE"); e == nil || e.Value == nil || *e.Value != "cloudflare" || e.Buildtime || !e.Runtime {
+		t.Fatalf("WAF_EDGE : %+v", e)
 	}
 
 	out, err = run(t, srv.URL, testApps(t, "koyo"), false)
@@ -998,7 +1010,11 @@ func TestEdgeSecretLitteralMasque(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustContain(t, out, "WAF_EDGE_SECRET : valeur littérale (valeur masquée) conservée, EDGE_SECRET_KOYO étant absente", "idempotence vérifiée")
+	mustContain(t, out,
+		"WAF_EDGE_SECRET : valeur littérale (valeur masquée) conservée, EDGE_SECRET_KOYO étant absente",
+		`+ env WAF_EDGE = "cloudflare"`,
+		"idempotence vérifiée",
+	)
 	if strings.Contains(out, edgeSecretFactice) {
 		t.Fatalf("secret littéral affiché :\n%s", out)
 	}
@@ -1018,4 +1034,83 @@ func TestEdgeSecretLitteralMasque(t *testing.T) {
 		t.Fatalf("WAF_EDGE_SECRET non vidée : %+v", e)
 	}
 	noDelete(t, f)
+}
+
+func TestEdgeRetenueOuGardee(t *testing.T) {
+	ref := ptr("{{team.EDGE_SECRET_KOYO}}")
+	for _, tc := range []struct {
+		name      string
+		team      *string
+		secret    *string
+		edge      *string
+		notes     []string
+		edgeAfter *string
+	}{
+		{
+			name: "clé vide",
+			team: ptr(""),
+			notes: []string{
+				"action ops : remplir EDGE_SECRET_KOYO dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision ; d'ici là WAF_EDGE_SECRET n'est pas posée et le WAF garde l'IP vue par Traefik",
+				"WAF_EDGE retenue tant que EDGE_SECRET_KOYO n'est pas remplie",
+			},
+		},
+		{
+			name:   "référence en place, clé vide",
+			team:   ptr(""),
+			secret: ref,
+			notes: []string{
+				"action ops : remplir EDGE_SECRET_KOYO dans l'UI Coolify (variables partagées de l'équipe), puis relancer provision\n",
+				"WAF_EDGE retenue tant que EDGE_SECRET_KOYO n'est pas remplie",
+			},
+		},
+		{
+			name:   "WAF_EDGE en place, clé supprimée",
+			secret: ref,
+			edge:   ptr("cloudflare"),
+			notes: []string{
+				"WAF_EDGE_SECRET : référence orpheline, wafgen run refuserait de démarrer\n",
+				"action ops : créer EDGE_SECRET_KOYO avec sa valeur dans l'UI Coolify (variables partagées de l'équipe), puis redéployer l'app\n",
+			},
+			edgeAfter: ptr("cloudflare"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFake(t, testToken)
+			f.addShared("WAF_BASE", ptr(wafBaseLiteral))
+			f.addShared("UPSTREAM_KOYO", ptr("https://koyo.koyeb.app"))
+			f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+			if tc.team != nil {
+				f.addShared("EDGE_SECRET_KOYO", tc.team)
+			}
+			a := f.addApp("waf-koyo-1", "dest-waf", nil)
+			if tc.secret != nil {
+				a.setEnv(f, "WAF_EDGE_SECRET", tc.secret, false, true)
+			}
+			if tc.edge != nil {
+				a.setEnv(f, "WAF_EDGE", tc.edge, false, true)
+			}
+			out, err := run(t, srv.URL, koyoEdge(t), true)
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			mustContain(t, out, append(tc.notes, "idempotence vérifiée")...)
+			if strings.Contains(out, "env WAF_EDGE") {
+				t.Fatalf("variable d'edge écrite sans secret utilisable :\n%s", out)
+			}
+			if tc.edgeAfter == nil && strings.Contains(out, "redéployer l'app") {
+				t.Fatalf("redéploiement annoncé alors que WAF_EDGE attend provision :\n%s", out)
+			}
+			if tc.edgeAfter != nil && strings.Contains(out, "retenue") {
+				t.Fatalf("WAF_EDGE en place annoncée retenue :\n%s", out)
+			}
+			e := a.env("WAF_EDGE")
+			switch {
+			case tc.edgeAfter == nil && e != nil:
+				t.Fatalf("WAF_EDGE posée : %+v", e)
+			case tc.edgeAfter != nil && (e == nil || e.Value == nil || *e.Value != *tc.edgeAfter):
+				t.Fatalf("WAF_EDGE en place modifiée : %+v", e)
+			}
+			noDelete(t, f)
+		})
+	}
 }
