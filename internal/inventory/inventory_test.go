@@ -47,7 +47,7 @@ func TestInventaireDuRepo(t *testing.T) {
 	if apps[0].Live || !apps[1].Live {
 		t.Fatalf("live : tacct %v, tacct-preprod %v", apps[0].Live, apps[1].Live)
 	}
-	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "preprod.tacct.ademe.fr" || p.Canonical != "" {
+	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "" || p.Canonical != "" {
 		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
 	}
 	if apps[0].Edge != "" || apps[1].Edge != "cloudflare" || apps[2].Edge != "" {
