@@ -217,8 +217,8 @@ func TestCanonicalCibleOpaque(t *testing.T) {
 	}
 }
 
-// Les rendus de testdata datent d'avant la redirection canonique. Une app sans
-// canonical garde la même conf Caddy, à l'octet près.
+// Les rendus de testdata datent d'avant la redirection canonique et l'edge
+// Cloudflare. Une app sans l'un ni l'autre garde la même conf Caddy, à l'octet près.
 func TestRenduSansCanonicalInchange(t *testing.T) {
 	base, err := os.ReadFile("testdata/base.json")
 	if err != nil {

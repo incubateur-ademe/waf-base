@@ -109,14 +109,22 @@ type envWant struct {
 	// en place est vidée plutôt que supprimée, le jeton SecOps n'ayant pas
 	// l'ability delete. Coolify stocke null, que wafgen run lit comme absente.
 	omitEmpty bool
+	// gates : variable que provision ne pose pas tant que celle-ci n'est pas
+	// utilisable. wafgen run refuse WAF_EDGE=cloudflare sans WAF_EDGE_SECRET,
+	// alors que sans WAF_EDGE il démarre en gardant l'IP vue par Traefik.
+	gates string
 }
 
 func Ref(key string) string { return "{{team." + key + "}}" }
 
 // failure dit ce que provoque la variable manquante : WAF_BASE, seule variable
-// de build, casse le build ; les autres font refuser le démarrage à wafgen run.
-func (w envWant) failure() (would, does string) {
-	if w.buildtime {
+// de build, casse le build ; les autres font refuser le démarrage à wafgen run,
+// sauf le secret d'edge tant que WAF_EDGE n'est pas en place.
+func (w envWant) failure(gateIdle bool) (would, does string) {
+	switch {
+	case gateIdle:
+		return "le WAF garderait l'IP vue par Traefik", "le WAF garde l'IP vue par Traefik"
+	case w.buildtime:
 		return "le build échouerait", "le build échoue"
 	}
 	return "wafgen run refuserait de démarrer", "wafgen run refuse de démarrer"
@@ -149,6 +157,11 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 	if app.Platform == "koyeb" {
 		out = append(out, envWant{key: "ORIGIN_TOKEN", shared: "ORIGIN_TOKEN_" + sfx, required: true})
 	}
+	edgeSecret := envWant{key: "WAF_EDGE_SECRET", omitEmpty: true}
+	if app.Edge != "" {
+		edgeSecret.shared, edgeSecret.required, edgeSecret.gates = "EDGE_SECRET_"+sfx, true, "WAF_EDGE"
+	}
+	out = append(out, edgeSecret, envWant{key: "WAF_EDGE", value: app.Edge, omitEmpty: true})
 	for i := range out {
 		if out[i].shared != "" {
 			out[i].value = Ref(out[i].shared)
@@ -338,7 +351,7 @@ func fieldChanges(cur coolify.Application, app inventory.App, ghID int64) ([]Cha
 }
 
 func showEnv(key, v string) string {
-	if key == "ORIGIN_TOKEN" && !strings.Contains(v, "{{") && v != "" {
+	if (key == "ORIGIN_TOKEN" || key == "WAF_EDGE_SECRET") && !strings.Contains(v, "{{") && v != "" {
 		return "(valeur masquée)"
 	}
 	return strconv.Quote(v)
@@ -511,6 +524,7 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 	}
 
 	wanted := map[string]bool{}
+	heldBy := map[string]string{}
 	for _, w := range wantEnvs(app, cfg) {
 		wanted[w.key] = true
 		write := coolify.EnvWrite{Key: w.key, IsBuildtime: w.buildtime, IsRuntime: !w.buildtime}
@@ -527,9 +541,14 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		if w.omitEmpty && value == "" && strings.TrimSpace(old) == "" {
 			continue
 		}
+		if k := heldBy[w.key]; k != "" {
+			ap.Notes = append(ap.Notes, fmt.Sprintf("%s retenue tant que %s n'est pas remplie", w.key, k))
+			continue
+		}
 		valueOK := ok && sameValue(old, value)
 		refInPlace := valueOK
-		would, does := w.failure()
+		gateIdle := w.gates != "" && strings.TrimSpace(envValue(current[w.gates])) == ""
+		would, does := w.failure(gateIdle)
 		// Une référence ne se pose que si sa clé d'équipe est utilisable : une
 		// optionnelle si elle existe, une requise si elle est en plus remplie.
 		refOK := w.shared == "" || st.exists && (!w.required || st.filled())
@@ -563,13 +582,16 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis relancer provision pour remplacer la valeur littérale")
 			case !st.filled() && !ok:
 				ap.Notes = append(ap.Notes, fmt.Sprintf("%s, puis relancer provision ; d'ici là %s n'est pas posée et %s", st.opsAction(w.shared), w.key, does))
-			case !st.filled() && refInPlace:
+			case !st.filled() && refInPlace && !gateIdle:
 				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis redéployer l'app")
 			case !st.filled():
 				ap.Notes = append(ap.Notes, st.opsAction(w.shared)+", puis relancer provision")
 			case !st.known:
 				ap.Notes = append(ap.Notes, st.unreadable(w.shared))
 			}
+		}
+		if gateIdle && !literalKept && !st.filled() {
+			heldBy[w.gates] = w.shared
 		}
 		if !refOK && !valueOK {
 			if !ok {

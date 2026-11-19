@@ -133,12 +133,19 @@ func Check(p Paths, logf func(string, ...any)) (*Report, error) {
 	if err != nil {
 		return rep, fmt.Errorf("rendu avec redirection canonique : %w", err)
 	}
+	edge := *in
+	edge.Edge = render.EdgeCloudflare
+	cfgEdge, err := render.Caddy(base, &edge)
+	if err != nil {
+		return rep, fmt.Errorf("rendu avec edge Cloudflare : %w", err)
+	}
 	confs := []struct {
 		nom, fichier string
 		cfg          []byte
 	}{
 		{"conf", "caddy.json", cfg},
 		{"conf avec redirection canonique", "caddy-canonical.json", cfgCanon},
+		{"conf avec edge Cloudflare", "caddy-edge.json", cfgEdge},
 	}
 	for _, c := range confs {
 		cfgPath := filepath.Join(state, c.fichier)

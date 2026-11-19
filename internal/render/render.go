@@ -33,6 +33,7 @@ type Input struct {
 	Tenant         string
 	Hosts          []string
 	Canonical      string
+	Edge           string
 	HostHeader     string
 	Platform       string
 	Upstream       string
@@ -235,7 +236,11 @@ func reverseProxy(in *Input) (obj, error) {
 		"X-Forwarded-For":   []string{"{http.vars.client_ip}"},
 		"X-Forwarded-Proto": []string{"https"},
 	}
-	headers := obj{"request": obj{"set": set}}
+	request := obj{"set": set}
+	if in.Edge == EdgeCloudflare {
+		request["delete"] = []string{"CF-Connecting-IP", "X-Ademe-Edge"}
+	}
+	headers := obj{"request": request}
 	if in.Platform == "koyeb" {
 		set["X-Ademe-Waf"] = []string{"{env.ORIGIN_TOKEN}"}
 	}
@@ -270,10 +275,90 @@ func otherHosts(in *Input) []string {
 	return out
 }
 
+const EdgeCloudflare = "cloudflare"
+
+// edgeIP reconnaît une IPv4 pointée ou une IPv6 sans zone, sous une forme que
+// netip.ParseAddr accepte.
+var edgeIP = ipPattern()
+
+func ipPattern() string {
+	const (
+		h     = `[0-9A-Fa-f]{1,4}`
+		octet = `(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])`
+	)
+	v4 := octet + `(?:\.` + octet + `){3}`
+	// head(k) : de 0 à k groupes, puis « :: ».
+	head := func(k int) string {
+		if k == 0 {
+			return "::"
+		}
+		return fmt.Sprintf(`(?:(?:%s:){1,%d}|:):`, h, k)
+	}
+	tail := func(n int) string {
+		switch n {
+		case 0:
+			return ""
+		case 1:
+			return h
+		}
+		return fmt.Sprintf(`%s(?::%s){%d}`, h, h, n-1)
+	}
+	alts := []string{v4, fmt.Sprintf(`(?:%s:){7}%s`, h, h), fmt.Sprintf(`(?:%s:){6}%s`, h, v4)}
+	for n := 0; n <= 7; n++ {
+		alts = append(alts, head(7-n)+tail(n))
+	}
+	for n := 0; n <= 5; n++ {
+		t := tail(n)
+		if n > 0 {
+			t += ":"
+		}
+		alts = append(alts, head(5-n)+t+v4)
+	}
+	return "^(?:" + strings.Join(alts, "|") + ")$"
+}
+
+// edgeRoutes remplace client_ip par CF-Connecting-IP quand X-Ademe-Edge porte
+// le secret posé par la zone Cloudflare de l'app, puis retire X-Ademe-Edge
+// avant Coraza. Le secret reste hors de la conf rendue : Caddy le lit dans
+// l'environnement que wafgen run a validé.
+func edgeRoutes() []any {
+	return []any{
+		obj{
+			"match": []any{obj{
+				"header":        obj{"X-Ademe-Edge": []string{"{env.WAF_EDGE_SECRET}"}},
+				"header_regexp": obj{"CF-Connecting-IP": obj{"name": "waf_edge", "pattern": edgeIP}},
+			}},
+			"handle": []any{obj{"handler": "vars", "client_ip": "{http.regexp.waf_edge.0}"}},
+		},
+		obj{"handle": []any{obj{"handler": "headers", "request": obj{"delete": []string{"X-Ademe-Edge"}}}}},
+	}
+}
+
+// edgeLogging retire X-Ademe-Edge des logs d'erreur et d'accès de Caddy, qui
+// copient les en-têtes de la requête avant le premier handler : un 502 de
+// l'origine journaliserait sinon le secret.
+func edgeLogging() obj {
+	names := []string{"http.log.access", "http.log.error"}
+	return obj{"logs": obj{
+		"default": obj{"exclude": names},
+		"requetes": obj{
+			"include": names,
+			"encoder": obj{
+				"format": "filter",
+				"wrap":   obj{"format": "json"},
+				"fields": obj{"request>headers>X-Ademe-Edge": obj{"filter": "delete"}},
+			},
+		},
+	}}
+}
+
 // SiteRoute renvoie la route Caddy des hosts de l'app, équivalente au site de la section 5.7.
 func SiteRoute(in *Input) (obj, error) {
 	if in.Canonical != "" && (!slices.Contains(in.Hosts, in.Canonical) || !reHost.MatchString(in.Canonical)) {
 		return nil, fmt.Errorf("WAF_CANONICAL_HOST %q : un des WAF_HOSTS valides attendu", in.Canonical)
+	}
+	if in.Edge != "" && in.Edge != EdgeCloudflare {
+		return nil, fmt.Errorf("WAF_EDGE %q : %s seule valeur admise", in.Edge, EdgeCloudflare)
 	}
 	rp, err := reverseProxy(in)
 	if err != nil {
@@ -290,7 +375,11 @@ func SiteRoute(in *Input) (obj, error) {
 			"set":     obj{"Strict-Transport-Security": []string{"max-age=31536000"}},
 		}},
 	}
-	routes := []any{obj{"handle": socle}}
+	var routes []any
+	if in.Edge == EdgeCloudflare {
+		routes = edgeRoutes()
+	}
+	routes = append(routes, obj{"handle": socle})
 	routes = append(routes, requestBody(in)...)
 	routes = append(routes, obj{
 		"match":  []any{obj{"header": obj{"X-Forwarded-Proto": []string{"http"}}}},
@@ -368,6 +457,12 @@ func Caddy(base []byte, in *Input) ([]byte, error) {
 	}
 	existing, _ := srv["routes"].([]any)
 	srv["routes"] = append([]any{route}, existing...)
+	if in.Edge == EdgeCloudflare {
+		if _, ok := cfg["logging"]; ok {
+			return nil, fmt.Errorf("conf de base : bloc logging inattendu, le filtre de X-Ademe-Edge le remplacerait")
+		}
+		cfg["logging"] = edgeLogging()
+	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
 

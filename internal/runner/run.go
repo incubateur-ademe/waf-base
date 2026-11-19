@@ -40,6 +40,10 @@ const (
 
 var watchedEnv = regexp.MustCompile(`^(WAF_|UPSTREAM$|ORIGIN_TOKEN$)`)
 
+// Caddy compare X-Ademe-Edge à la valeur brute de WAF_EDGE_SECRET : aucune
+// espace n'est retirée avant le contrôle.
+var reEdgeSecret = regexp.MustCompile(`^[A-Za-z0-9_-]{32,}$`)
+
 // Inputs lit et vérifie les variables posées par wafgen provision.
 func Inputs(p Paths, pol *policy.Policy, lr *lint.Result, now time.Time) (*render.Input, error) {
 	for _, kv := range os.Environ() {
@@ -73,6 +77,16 @@ func Inputs(p Paths, pol *policy.Policy, lr *lint.Result, now time.Time) (*rende
 	canonical := strings.TrimSpace(os.Getenv("WAF_CANONICAL_HOST"))
 	if canonical != "" && !slices.Contains(hosts, canonical) {
 		return nil, fmt.Errorf("WAF_CANONICAL_HOST %q absent de WAF_HOSTS", canonical)
+	}
+	edge := strings.TrimSpace(os.Getenv("WAF_EDGE"))
+	switch edge {
+	case "":
+	case render.EdgeCloudflare:
+		if !reEdgeSecret.MatchString(os.Getenv("WAF_EDGE_SECRET")) {
+			return nil, fmt.Errorf("WAF_EDGE_SECRET manquante ou invalide pour WAF_EDGE=%s : 32 caractères au moins dans [A-Za-z0-9_-], sans espace", render.EdgeCloudflare)
+		}
+	default:
+		return nil, fmt.Errorf("WAF_EDGE %q : %s seule valeur admise", edge, render.EdgeCloudflare)
 	}
 	upstream, err := req("UPSTREAM")
 	if err != nil {
@@ -134,6 +148,7 @@ func Inputs(p Paths, pol *policy.Policy, lr *lint.Result, now time.Time) (*rende
 		Tenant:         name,
 		Hosts:          hosts,
 		Canonical:      canonical,
+		Edge:           edge,
 		HostHeader:     hh,
 		Platform:       platform,
 		Upstream:       upstream,
@@ -387,6 +402,12 @@ func Run(p Paths, logf func(string, ...any)) error {
 	if err := originCheck(in, logf); err != nil {
 		return fail(err)
 	}
+	if in.Edge != "" {
+		if err := edgeCheck(local, in, os.Getenv("WAF_EDGE_SECRET")); err != nil {
+			return fail(err)
+		}
+		logf("edge %s : IP du visiteur lue dans CF-Connecting-IP avec le secret, ignorée sans", in.Edge)
+	}
 	if mode == "block" {
 		if err := httpSelftest(in, lr, tap, logf); err != nil {
 			return fail(err)
@@ -485,6 +506,55 @@ func originCheck(in *render.Input, logf func(string, ...any)) error {
 		logf("origine : statut %d (journalisé, pas bloquant)", resp.StatusCode)
 	default:
 		logf("origine : statut %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// edgeProbe est l'adresse que l'autotest de l'edge annonce dans CF-Connecting-IP
+// (TEST-NET-2, RFC 5737).
+const edgeProbe = "198.51.100.77"
+
+// edgeCheck rejoue sur la boucle locale une requête venue de Cloudflare :
+// /__waf/ip doit renvoyer CF-Connecting-IP avec le secret, et une autre IP sans.
+func edgeCheck(base string, in *render.Input, secret string) error {
+	wrong := strings.Repeat("x", 40)
+	if wrong == secret {
+		wrong = strings.Repeat("y", 40)
+	}
+	cl := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	seen := func(edge string) (string, error) {
+		req, err := http.NewRequest(http.MethodGet, base+"/__waf/ip", nil)
+		if err != nil {
+			return "", err
+		}
+		req.Host = in.Hosts[0]
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("CF-Connecting-IP", edgeProbe)
+		req.Header.Set("X-Ademe-Edge", edge)
+		resp, err := cl.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("/__waf/ip : statut %d", resp.StatusCode)
+		}
+		return strings.TrimSpace(string(body)), nil
+	}
+	got, err := seen(secret)
+	if err != nil {
+		return fmt.Errorf("edge %s, requête avec le secret : %w", in.Edge, err)
+	}
+	if got != edgeProbe {
+		return fmt.Errorf("edge %s : avec le secret, /__waf/ip renvoie %q au lieu de CF-Connecting-IP", in.Edge, got)
+	}
+	got, err = seen(wrong)
+	if err != nil {
+		return fmt.Errorf("edge %s, requête sans le secret : %w", in.Edge, err)
+	}
+	if got == edgeProbe {
+		return fmt.Errorf("edge %s : sans le secret, CF-Connecting-IP est encore pris pour l'IP du visiteur", in.Edge)
 	}
 	return nil
 }

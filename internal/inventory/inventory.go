@@ -43,6 +43,7 @@ type entry struct {
 	Platform       *string    `yaml:"platform"`
 	Hosts          []string   `yaml:"hosts"`
 	Canonical      *string    `yaml:"canonical"`
+	Edge           *string    `yaml:"edge"`
 	HostHeader     *string    `yaml:"host_header"`
 	CRSPlugins     *[]string  `yaml:"crs_plugins"`
 	Live           *bool      `yaml:"live"`
@@ -76,6 +77,7 @@ type App struct {
 	Platform       string
 	Hosts          []string
 	Canonical      string
+	Edge           string
 	HostHeader     string
 	CRSPlugins     []string
 	Live           bool
@@ -122,6 +124,9 @@ func Parse(b []byte, platforms map[string]bool) ([]App, error) {
 	if f.Defaults.Canonical != nil {
 		return nil, fmt.Errorf("inventaire : canonical propre à une app, interdit dans defaults")
 	}
+	if f.Defaults.Edge != nil {
+		return nil, fmt.Errorf("inventaire : edge propre à une app, interdit dans defaults")
+	}
 	names := make([]string, 0, len(f.Apps))
 	for n := range f.Apps {
 		names = append(names, n)
@@ -162,6 +167,7 @@ func merge(name string, def, e entry) App {
 		Repo:           pick(e.Repo, def.Repo, ""),
 		Platform:       pick(e.Platform, def.Platform, ""),
 		Canonical:      pick(e.Canonical, nil, ""),
+		Edge:           pick(e.Edge, nil, ""),
 		HostHeader:     pick(e.HostHeader, def.HostHeader, "visitor"),
 		CRSPlugins:     pick(e.CRSPlugins, def.CRSPlugins, nil),
 		Live:           pick(e.Live, def.Live, false),
@@ -249,6 +255,9 @@ func validateRest(a App, platforms map[string]bool) error {
 	}
 	if !platforms[a.Platform] {
 		return fmt.Errorf("plateforme %q absente de policy/origines.yaml", a.Platform)
+	}
+	if a.Edge != "" && a.Edge != render.EdgeCloudflare {
+		return fmt.Errorf("edge %q : %s seule valeur admise", a.Edge, render.EdgeCloudflare)
 	}
 	if a.HostHeader != "visitor" && a.HostHeader != "upstream" {
 		return fmt.Errorf("host_header %q : visitor ou upstream", a.HostHeader)
