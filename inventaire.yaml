@@ -1,4 +1,5 @@
 # Apps protégées, modifiable par ops seulement (CODEOWNERS). Section 5.7 du design.
+# canonical: <host>, optionnel, un des hosts de l'app, jamais dans defaults : ses autres hosts y sont redirigés en 301 (Cache-Control max-age=86400), après le WAF.
 defaults:
   ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
   host_header: visitor

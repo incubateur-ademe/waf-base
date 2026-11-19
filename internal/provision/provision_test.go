@@ -790,3 +790,83 @@ func TestValeurEnPlaceGardee(t *testing.T) {
 		t.Fatalf("WAF_UNINSPECTED_PATHS : %+v", e)
 	}
 }
+
+func koyoApps(t *testing.T, canonical string) []inventory.App {
+	t.Helper()
+	y := strings.Replace(testInventory, "hosts: [koyo.example.org, www.koyo.example.org]\n",
+		"hosts: [koyo.example.org, www.koyo.example.org]\n    canonical: "+canonical+"\n", 1)
+	apps, err := inventory.Parse([]byte(y), map[string]bool{"scalingo": true, "koyeb": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range apps {
+		if a.Name == "koyo" {
+			return []inventory.App{a}
+		}
+	}
+	t.Fatal("app koyo absente")
+	return nil
+}
+
+func TestCanonicalPoseeModifieeVidee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	f.addShared("WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:f4bc"))
+	f.addShared("UPSTREAM_KOYO", ptr("https://koyo.koyeb.app"))
+	f.addShared("ORIGIN_TOKEN_KOYO", ptr("jeton-origine-koyo"))
+
+	out, err := run(t, srv.URL, koyoApps(t, "koyo.example.org"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `+ env WAF_CANONICAL_HOST = "koyo.example.org"`, "idempotence vérifiée")
+	a := f.appByName("waf-koyo-1")
+	if e := a.env("WAF_CANONICAL_HOST"); e == nil || e.Value == nil || *e.Value != "koyo.example.org" || e.Buildtime || !e.Runtime {
+		t.Fatalf("WAF_CANONICAL_HOST : %+v", e)
+	}
+
+	out, err = run(t, srv.URL, koyoApps(t, "www.koyo.example.org"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `~ env WAF_CANONICAL_HOST : "koyo.example.org" -> "www.koyo.example.org"`, "idempotence vérifiée")
+
+	out, err = run(t, srv.URL, testApps(t, "koyo"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, `~ env WAF_CANONICAL_HOST : "www.koyo.example.org" -> ""`, "1 changement(s) prévu(s)")
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+	if e := a.env("WAF_CANONICAL_HOST"); e == nil || e.Value != nil {
+		t.Fatalf("WAF_CANONICAL_HOST non vidée : %+v", e)
+	}
+	for _, w := range f.writes {
+		if strings.HasPrefix(w, "DELETE ") {
+			t.Fatalf("suppression demandée, le jeton SecOps n'a pas l'ability delete : %v", f.writes)
+		}
+	}
+
+	n := len(f.writes)
+	out, err = run(t, srv.URL, testApps(t, "koyo"), true)
+	if err != nil || len(f.writes) != n {
+		t.Fatalf("passage sans canonical : %v, %d écritures\n%s", err, len(f.writes)-n, out)
+	}
+	if strings.Contains(out, "WAF_CANONICAL_HOST") {
+		t.Fatalf("WAF_CANONICAL_HOST vide encore citée :\n%s", out)
+	}
+}
+
+func TestCanonicalAbsenteNonCreee(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	a := pilotApp(f)
+	out, err := run(t, srv.URL, testApps(t, "waf-pilote"), true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "WAF_CANONICAL_HOST") || a.env("WAF_CANONICAL_HOST") != nil {
+		t.Fatalf("WAF_CANONICAL_HOST posée sans canonical :\n%s", out)
+	}
+}

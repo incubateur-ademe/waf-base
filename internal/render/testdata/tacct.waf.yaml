@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/incubateur-ademe/waf-base/v1/policy/waf.schema.json
+version: 1
+contacts: [equipe@tacct.example]
+rate_limits:
+  default: { events: 40, window: 1s }
+  zones:
+    - name: tuiles
+      paths: ["/api/map-proxy"]
+      events: 100
+      window: 1s
+      reason: "Proxy de tuiles cartographiques, repris du Caddyfile TACCT"

@@ -1,0 +1,362 @@
+{
+  "admin": {
+    "config": {
+      "persist": false
+    },
+    "disabled": true
+  },
+  "apps": {
+    "http": {
+      "grace_period": 10000000000,
+      "http_port": 8080,
+      "metrics": {
+        "per_host": true
+      },
+      "servers": {
+        "srv0": {
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            ":2020"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "vars",
+                          "root": "/var/lib/waf"
+                        }
+                      ]
+                    },
+                    {
+                      "group": "group0",
+                      "handle": [
+                        {
+                          "handler": "rewrite",
+                          "uri": "/mode.prom"
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "file_server",
+                          "hide": [
+                            "caddy/Caddyfile"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "path": [
+                    "/mode"
+                  ]
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 200
+                }
+              ],
+              "match": [
+                {
+                  "file": {
+                    "root": "/var/lib/waf",
+                    "try_files": [
+                      "/ready"
+                    ]
+                  },
+                  "path": [
+                    "/healthz"
+                  ]
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 503
+                }
+              ],
+              "match": [
+                {
+                  "path": [
+                    "/healthz"
+                  ]
+                }
+              ]
+            },
+            {
+              "handle": [
+                {
+                  "handler": "metrics"
+                }
+              ],
+              "match": [
+                {
+                  "path": [
+                    "/metrics"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "srv1": {
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            ":8080"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "deferred": true,
+                            "delete": [
+                              "Server",
+                              "X-Powered-By"
+                            ]
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Content-Type-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Content-Type-Options": [
+                                "nosniff"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "Strict-Transport-Security": null
+                              }
+                            },
+                            "set": {
+                              "Strict-Transport-Security": [
+                                "max-age=31536000"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "request_body",
+                          "max_size": 13107200
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "static_response",
+                          "headers": {
+                            "Location": [
+                              "https://{http.request.host}{http.request.uri}"
+                            ]
+                          },
+                          "status_code": 301
+                        }
+                      ],
+                      "match": [
+                        {
+                          "header": {
+                            "X-Forwarded-Proto": [
+                              "http"
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "subroute",
+                          "routes": [
+                            {
+                              "handle": [
+                                {
+                                  "handler": "static_response",
+                                  "status_code": 200
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "path": [
+                                    "/__waf/healthz"
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "body": "{http.vars.client_ip}",
+                                  "handler": "static_response",
+                                  "status_code": 200
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "path": [
+                                    "/__waf/ip"
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "disable_metrics": true,
+                                  "handler": "rate_limit",
+                                  "rate_limits": {
+                                    "waf-pilote__defaut": {
+                                      "ipv6_prefix": 64,
+                                      "key": "{http.vars.client_ip}",
+                                      "max_events": 40,
+                                      "window": 1000000000
+                                    }
+                                  }
+                                }
+                              ],
+                              "match": [
+                                {
+                                  "not": [
+                                    {
+                                      "remote_ip": {
+                                        "ranges": [
+                                          "127.0.0.0/8",
+                                          "::1/128"
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "handle": [
+                                {
+                                  "directives": "# wafgen tenant=waf-pilote rev=0123456789ab\nInclude /etc/waf/coraza/coraza.conf-recommended\nInclude /etc/waf/coraza/10-moteur.conf\nInclude /etc/waf/crs/crs-setup.conf.example\nInclude /etc/waf/coraza/20-planchers.conf\nInclude /var/lib/waf/ops.conf\nInclude /etc/waf/crs/rules/*.conf\nInclude /etc/waf/coraza/90-garde-fous.conf\nInclude /var/lib/waf/override.conf\n",
+                                  "handler": "waf",
+                                  "load_owasp_crs": false
+                                },
+                                {
+                                  "encodings": {
+                                    "gzip": {},
+                                    "zstd": {}
+                                  },
+                                  "handler": "encode",
+                                  "prefer": [
+                                    "zstd",
+                                    "gzip"
+                                  ]
+                                },
+                                {
+                                  "handler": "reverse_proxy",
+                                  "headers": {
+                                    "request": {
+                                      "set": {
+                                        "Host": [
+                                          "{http.request.host}"
+                                        ],
+                                        "X-Forwarded-For": [
+                                          "{http.vars.client_ip}"
+                                        ],
+                                        "X-Forwarded-Proto": [
+                                          "https"
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "transport": {
+                                    "protocol": "http",
+                                    "tls": {
+                                      "server_name": "waf-pilote.osc-fr1.scalingo.io"
+                                    }
+                                  },
+                                  "upstreams": [
+                                    {
+                                      "dial": "waf-pilote.osc-fr1.scalingo.io:443"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "waf-pilote.incubateur.ademe.dev"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 421
+                }
+              ]
+            }
+          ],
+          "trusted_proxies": {
+            "ranges": [
+              "192.168.0.0/16",
+              "172.16.0.0/12",
+              "10.0.0.0/8",
+              "127.0.0.1/8",
+              "fd00::/8",
+              "::1"
+            ],
+            "source": "static"
+          },
+          "trusted_proxies_strict": 1
+        }
+      }
+    }
+  }
+}

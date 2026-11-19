@@ -105,6 +105,10 @@ type envWant struct {
 	buildtime bool
 	shared    string
 	required  bool
+	// omitEmpty : sans valeur voulue, la variable n'est pas créée, et une valeur
+	// en place est vidée plutôt que supprimée, le jeton SecOps n'ayant pas
+	// l'ability delete. Coolify stocke null, que wafgen run lit comme absente.
+	omitEmpty bool
 }
 
 func Ref(key string) string { return "{{team." + key + "}}" }
@@ -136,6 +140,7 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 		{key: "WAF_PLATFORM", value: app.Platform},
 		{key: "WAF_CRS_PLUGINS", value: strings.Join(app.CRSPlugins, ",")},
 		{key: "WAF_CEILINGS", value: app.Ceilings.Env()},
+		{key: "WAF_CANONICAL_HOST", value: app.Canonical, omitEmpty: true},
 		{key: "UPSTREAM", shared: "UPSTREAM_" + sfx, required: true},
 		{key: "WAF_DETECTION_UNTIL", shared: "DETECTION_UNTIL_" + sfx},
 		{key: "WAF_UNINSPECTED_PATHS", shared: "UNINSPECTED_PATHS_" + sfx},
@@ -519,6 +524,9 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 			return ap, fmt.Errorf("valeur de %s illisible : le jeton doit avoir read:sensitive", w.key)
 		}
 		old := envValue(e)
+		if w.omitEmpty && value == "" && strings.TrimSpace(old) == "" {
+			continue
+		}
 		valueOK := ok && sameValue(old, value)
 		refInPlace := valueOK
 		would, does := w.failure()

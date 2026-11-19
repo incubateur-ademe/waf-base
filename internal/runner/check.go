@@ -126,18 +126,35 @@ func Check(p Paths, logf func(string, ...any)) (*Report, error) {
 	if string(again) != string(cfg) {
 		return rep, fmt.Errorf("rendu non déterministe")
 	}
-	cfgPath := filepath.Join(state, "caddy.json")
-	if err := os.WriteFile(cfgPath, cfg, 0o600); err != nil {
-		return rep, err
+	canon := *in
+	canon.Hosts = []string{"check.invalid", "www.check.invalid"}
+	canon.Canonical = "check.invalid"
+	cfgCanon, err := render.Caddy(base, &canon)
+	if err != nil {
+		return rep, fmt.Errorf("rendu avec redirection canonique : %w", err)
 	}
-	if p.Caddy != "" {
+	confs := []struct {
+		nom, fichier string
+		cfg          []byte
+	}{
+		{"conf", "caddy.json", cfg},
+		{"conf avec redirection canonique", "caddy-canonical.json", cfgCanon},
+	}
+	for _, c := range confs {
+		cfgPath := filepath.Join(state, c.fichier)
+		if err := os.WriteFile(cfgPath, c.cfg, 0o600); err != nil {
+			return rep, err
+		}
+		if p.Caddy == "" {
+			continue
+		}
 		cmd := exec.Command(p.Caddy, "validate", "--config", cfgPath)
 		cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+state, "XDG_DATA_HOME="+state)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return rep, fmt.Errorf("caddy validate : %v\n%s", err, tail(string(out), 40))
+			return rep, fmt.Errorf("caddy validate, %s : %v\n%s", c.nom, err, tail(string(out), 40))
 		}
-		logf("caddy validate : conf valide")
+		logf("caddy validate : %s valide", c.nom)
 	}
 	w, err := selftest.NewWAF(render.Directives(in) + "SecAuditEngine Off\n")
 	if err != nil {

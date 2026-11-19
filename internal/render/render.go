@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ type Input struct {
 	State          string
 	Tenant         string
 	Hosts          []string
+	Canonical      string
 	HostHeader     string
 	Platform       string
 	Upstream       string
@@ -255,8 +257,24 @@ func reverseProxy(in *Input) (obj, error) {
 	}, nil
 }
 
+func otherHosts(in *Input) []string {
+	if in.Canonical == "" {
+		return nil
+	}
+	var out []string
+	for _, h := range in.Hosts {
+		if h != in.Canonical {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // SiteRoute renvoie la route Caddy des hosts de l'app, équivalente au site de la section 5.7.
 func SiteRoute(in *Input) (obj, error) {
+	if in.Canonical != "" && (!slices.Contains(in.Hosts, in.Canonical) || !reHost.MatchString(in.Canonical)) {
+		return nil, fmt.Errorf("WAF_CANONICAL_HOST %q : un des WAF_HOSTS valides attendu", in.Canonical)
+	}
 	rp, err := reverseProxy(in)
 	if err != nil {
 		return nil, err
@@ -287,11 +305,30 @@ func SiteRoute(in *Input) (obj, error) {
 			"match":  []any{obj{"not": []any{obj{"remote_ip": obj{"ranges": []string{"127.0.0.0/8", "::1/128"}}}}}},
 			"handle": []any{rateLimit(in)},
 		},
-		obj{"handle": []any{
-			obj{"handler": "waf", "load_owasp_crs": false, "directives": Directives(in)},
-			obj{"handler": "encode", "encodings": obj{"zstd": obj{}, "gzip": obj{}}, "prefer": []string{"zstd", "gzip"}},
-			rp,
-		}},
+	}
+	waf := obj{"handler": "waf", "load_owasp_crs": false, "directives": Directives(in)}
+	encode := obj{"handler": "encode", "encodings": obj{"zstd": obj{}, "gzip": obj{}}, "prefer": []string{"zstd", "gzip"}}
+	if others := otherHosts(in); len(others) > 0 {
+		redirect := obj{"handler": "static_response", "status_code": 301, "headers": obj{
+			"Location": []string{"https://" + in.Canonical + "{http.request.uri}"},
+			// Les navigateurs gardent un 301 sans durée indéfiniment. Borné à un
+			// jour, le canonique reste inversable.
+			"Cache-Control": []string{"max-age=86400"},
+		}}
+		// Redirection après Coraza : une attaque sur un host non canonique prend
+		// 403, comme l'autotest de wafgen run l'attend sur chaque host.
+		inner = append(inner,
+			obj{"handle": []any{waf}},
+			obj{
+				// Une cible opaque (GET a:@evil.com) n'a pas de / initial. Collée
+				// derrière le canonique, elle changerait l'autorité de la Location.
+				"match":  []any{obj{"host": others, "path": []string{"/*"}}},
+				"handle": []any{redirect},
+			},
+			obj{"handle": []any{encode, rp}},
+		)
+	} else {
+		inner = append(inner, obj{"handle": []any{waf, encode, rp}})
 	}
 	routes = append(routes, obj{"handle": []any{obj{"handler": "subroute", "routes": inner}}})
 	return obj{
