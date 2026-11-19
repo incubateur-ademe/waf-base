@@ -17,8 +17,8 @@ const testToken = "7|jeton-coolify-de-test-qui-ne-doit-jamais-sortir"
 
 const testInventory = `
 vms:
-  "1": { stage: prod, ip: 192.0.2.10 }
-  preprod: { stage: preprod, ip: 198.51.100.20 }
+  "1": { stage: prod, ip: 78.232.54.148 }
+  preprod: { stage: preprod, ip: 51.15.20.30 }
 defaults:
   ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
   host_header: visitor
@@ -566,8 +566,8 @@ func TestConfigDefauts(t *testing.T) {
 // stagesInventory : le pilote passe sur la VM de preprod, koyo reste en prod.
 const stagesInventory = `
 vms:
-  "1": { stage: prod, ip: 192.0.2.10 }
-  preprod: { stage: preprod, ip: 198.51.100.20 }
+  "1": { stage: prod, ip: 78.232.54.148 }
+  preprod: { stage: preprod, ip: 51.15.20.30 }
 apps:
   waf-pilote:
     repo: incubateur-ademe/waf-pilote
@@ -624,7 +624,7 @@ func TestMainStages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur une autre VM")
+	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur un autre serveur")
 	if strings.Contains(out, "koyo") {
 		t.Fatalf("app de prod traitée sur la VM preprod :\n%s", out)
 	}
@@ -668,21 +668,31 @@ func TestJumeauSurUneAutreVM(t *testing.T) {
 
 	sans := preprodConfig(srv.URL)
 	sans.OtherVMs = nil
-	if _, err := runCfg(t, sans, apps, true); err == nil || !strings.Contains(err.Error(), "409") {
+	if _, err := runCfg(t, sans, apps, true); err == nil || !strings.Contains(err.Error(), "waf-pilote.incubateur.ademe.dev par waf-waf-pilote-1 (application)") {
 		t.Fatalf("création sans jumeau connu : %v", err)
 	}
 
+	n0 := len(f.writes)
 	out, err := runCfg(t, preprodConfig(srv.URL), apps, true)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur une autre VM : domaines posés avec force_domain_override", "idempotence vérifiée")
+	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur un autre serveur : force_domain_override si Coolify ne signale de conflit de domaine qu'avec lui", "idempotence vérifiée")
 	a := f.appByName("waf-waf-pilote-preprod")
 	if a == nil || a.dest != "dest-waf-preprod" || a.data["fqdn"] != "https://waf-pilote.incubateur.ademe.dev" {
 		t.Fatalf("app preprod : %+v", a)
 	}
-	if strings.Count(strings.Join(f.bodies, "\n"), `"force_domain_override":true`) != 1 {
-		t.Fatalf("force_domain_override absent de la création :\n%s", strings.Join(f.bodies, "\n"))
+	creates := 0
+	for i := n0; i < len(f.writes); i++ {
+		if f.writes[i] == "POST /api/v1/applications/private-github-app" {
+			creates++
+			if forced := strings.Contains(f.bodies[i], `"force_domain_override":true`); forced != (creates == 2) {
+				t.Fatalf("création %d : force_domain_override=%t, attendu au seul second essai", creates, forced)
+			}
+		}
+	}
+	if creates != 2 {
+		t.Fatalf("%d créations, 2 attendues : sans l'option, puis avec après le 409 du jumeau", creates)
 	}
 	if strings.Contains(out[strings.Index(out, "second calcul"):], "jumeau") {
 		t.Fatalf("note de jumeau sans écriture de domaine :\n%s", out)
@@ -697,6 +707,35 @@ func TestJumeauSurUneAutreVM(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(f.bodies[n:], "\n"), `"force_domain_override":true`) {
 		t.Fatalf("PATCH des domaines sans force_domain_override :\n%s", strings.Join(f.bodies[n:], "\n"))
+	}
+}
+
+func TestJumeauSurLeMemeServeurRefuse(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	f.addShared("UPSTREAM_WAF_PILOTE", ptr(pilotUpstream))
+	cfg := preprodConfig(srv.URL)
+	cfg.ServerUUID, cfg.DestinationUUID = "srv-waf-1", "dest-waf"
+	_, err := runCfg(t, cfg, testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "jumeau waf-waf-pilote-1 sur le serveur srv-waf-1, celui de WAF_OPS_SERVER_UUID : WAF_OPS_VM=preprod") {
+		t.Fatalf("erreur = %v", err)
+	}
+	if len(f.writes) != 0 || f.appByName("waf-waf-pilote-preprod") != nil {
+		t.Fatalf("écritures : %v", f.writes)
+	}
+}
+
+func TestConflitHorsDuJumeau(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	f.addApp("site-vitrine", "dest-coolify", map[string]any{"fqdn": "https://waf-pilote.incubateur.ademe.dev"})
+	f.addShared("UPSTREAM_WAF_PILOTE", ptr(pilotUpstream))
+	_, err := runCfg(t, preprodConfig(srv.URL), testApps(t, "waf-pilote"), true)
+	if err == nil || !strings.Contains(err.Error(), "par site-vitrine (application)") {
+		t.Fatalf("erreur = %v", err)
+	}
+	if strings.Contains(strings.Join(f.bodies, "\n"), "force_domain_override") || f.appByName("waf-waf-pilote-preprod") != nil {
+		t.Fatalf("domaine forcé malgré un conflit hors du jumeau :\n%s", strings.Join(f.bodies, "\n"))
 	}
 }
 
@@ -722,7 +761,8 @@ func TestBaseParServeur(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustContain(t, out, `~ env WAF_BASE : "{{team.WAF_BASE}}" -> "{{server.WAF_BASE}}"`, "idempotence vérifiée")
+	mustContain(t, out, `~ env WAF_BASE : "{{team.WAF_BASE}}" -> "{{server.WAF_BASE}}"`,
+		"WAF_BASE : la base des apps de la VM 1 passe de {{team.WAF_BASE}} à {{server.WAF_BASE}} au prochain build", "idempotence vérifiée")
 	if v := f.appByName("waf-waf-pilote-1").env("WAF_BASE"); v == nil || *v.Value != "{{server.WAF_BASE}}" || !v.Buildtime || v.Runtime {
 		t.Fatalf("WAF_BASE : %+v", v)
 	}

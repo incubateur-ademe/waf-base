@@ -232,7 +232,7 @@ func parseVMs(in map[string]vmEntry) ([]VM, error) {
 			return nil, fmt.Errorf("inventaire, vm %s : stage %q, %s ou %s", n, v.Stage, StageProd, StagePreprod)
 		}
 		ip, err := netip.ParseAddr(v.IP)
-		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() || reserved(ip) {
 			return nil, fmt.Errorf("inventaire, vm %s : ip %q, IPv4 publique attendue", n, v.IP)
 		}
 		if o, ok := owner[ip]; ok {
@@ -242,6 +242,28 @@ func parseVMs(in map[string]vmEntry) ([]VM, error) {
 		out = append(out, VM{Name: n, Stage: v.Stage, IP: ip.String()})
 	}
 	return out, nil
+}
+
+// Plages IPv4 que netip ne classe ni privées ni hors unicast global : aucune ne
+// peut être l'IP publique d'une VM.
+var reservedV4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+func reserved(ip netip.Addr) bool {
+	for _, p := range reservedV4 {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func validStage(s string) bool {

@@ -4,8 +4,10 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -203,14 +205,16 @@ type AppPlan struct {
 	App  inventory.App
 	Name string
 	UUID string
-	// Twin : app de même nom sur une autre VM, qui tient déjà les domaines.
-	// Coolify refuse alors les domaines sans force_domain_override.
-	Twin   string
-	Create bool
-	Fields []Change
-	Envs   []EnvChange
-	Notes  []string
-	patch  map[string]any
+	// Twins : apps de même nom sur les autres VM, contrôlées sur un autre
+	// serveur. Elles tiennent déjà les domaines, que Coolify refuse (409) sans
+	// force_domain_override.
+	Twins     []string
+	twinUUIDs map[string]bool
+	Create    bool
+	Fields    []Change
+	Envs      []EnvChange
+	Notes     []string
+	patch     map[string]any
 }
 
 func (a *AppPlan) Changed() bool {
@@ -545,8 +549,15 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 			}
 			ap.UUID = a.UUID
 		}
-		if twins[a.Name] && ap.Twin == "" {
-			ap.Twin = a.Name
+		if twins[a.Name] {
+			if err := checkTwin(ctx, api, a, cfg); err != nil {
+				return ap, err
+			}
+			ap.Twins = append(ap.Twins, a.Name)
+			if ap.twinUUIDs == nil {
+				ap.twinUUIDs = map[string]bool{}
+			}
+			ap.twinUUIDs[a.UUID] = true
 		}
 	}
 	current := map[string]coolify.Env{}
@@ -671,6 +682,9 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		if !valueOK {
 			write.Value = &value
 			newS = showEnv(w.key, value)
+			if w.key == "WAF_BASE" && strings.TrimSpace(old) != "" {
+				ap.Notes = append(ap.Notes, fmt.Sprintf("WAF_BASE : la base des apps de la VM %s passe de %s à %s au prochain build", cfg.VM, old, value))
+			}
 		}
 		if !flagsOK {
 			oldS += fmt.Sprintf(" build=%t runtime=%t", e.IsBuildtime, e.IsRuntime)
@@ -678,9 +692,9 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		}
 		ap.Envs = append(ap.Envs, EnvChange{Key: w.key, Old: oldS, New: newS, Write: write})
 	}
-	if ap.Twin != "" {
+	if len(ap.Twins) > 0 {
 		if _, ok := ap.patch["domains"]; ap.Create || ok {
-			ap.Notes = append(ap.Notes, fmt.Sprintf("jumeau %s sur une autre VM : domaines posés avec force_domain_override", ap.Twin))
+			ap.Notes = append(ap.Notes, fmt.Sprintf("jumeau %s sur un autre serveur : force_domain_override si Coolify ne signale de conflit de domaine qu'avec lui", strings.Join(ap.Twins, ", ")))
 		}
 	}
 	var extra []string
@@ -696,6 +710,57 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 	return ap, nil
 }
 
+// checkTwin refuse un jumeau sur le serveur visé : Coolify contrôle les
+// domaines pour toute l'équipe, et force_domain_override ne se justifie que
+// d'un serveur à l'autre. Il rattrape un WAF_OPS_VM qui ne correspond pas au
+// serveur de WAF_OPS_SERVER_UUID.
+func checkTwin(ctx context.Context, api API, twin coolify.AppSummary, cfg Config) error {
+	ds, err := api.ApplicationDestinations(ctx, twin.UUID)
+	if err != nil {
+		return err
+	}
+	if len(ds) == 0 {
+		return fmt.Errorf("jumeau %s sans destination lisible", twin.Name)
+	}
+	for _, d := range ds {
+		if d.ServerUUID == "" {
+			return fmt.Errorf("jumeau %s : serveur de la destination %s illisible", twin.Name, d.UUID)
+		}
+		if d.ServerUUID == cfg.ServerUUID {
+			return fmt.Errorf("jumeau %s sur le serveur %s, celui de WAF_OPS_SERVER_UUID : WAF_OPS_VM=%s ne correspond pas à ce serveur", twin.Name, cfg.ServerUUID, cfg.VM)
+		}
+	}
+	return nil
+}
+
+// onlyTwins dit si err est un 409 dont chaque conflit de domaine désigne un
+// jumeau de l'app. Un conflit avec une autre ressource, avec l'instance ou avec
+// une ressource que le jeton ne voit pas (uuid null) garde le refus de Coolify.
+func (a *AppPlan) onlyTwins(err error) bool {
+	var he *coolify.HTTPError
+	if len(a.twinUUIDs) == 0 || !errors.As(err, &he) || he.Status != http.StatusConflict || len(he.Conflicts) == 0 {
+		return false
+	}
+	for _, c := range he.Conflicts {
+		if c.ResourceUUID == nil || !a.twinUUIDs[*c.ResourceUUID] {
+			return false
+		}
+	}
+	return true
+}
+
+func conflictErr(err error) error {
+	var he *coolify.HTTPError
+	if !errors.As(err, &he) || len(he.Conflicts) == 0 {
+		return err
+	}
+	l := make([]string, 0, len(he.Conflicts))
+	for _, c := range he.Conflicts {
+		l = append(l, fmt.Sprintf("%s par %s (%s)", c.Domain, c.ResourceName, c.ResourceType))
+	}
+	return fmt.Errorf("domaines déjà portés dans l'équipe hors des jumeaux de l'app : %s : %w", strings.Join(l, ", "), err)
+}
+
 // ---------- application
 
 func createBody(ap *AppPlan, cfg Config) map[string]any {
@@ -709,9 +774,6 @@ func createBody(ap *AppPlan, cfg Config) map[string]any {
 		"autogenerate_domain": false,
 		"instant_deploy":      false,
 		"tags":                []string{"waf", "waf-" + cfg.VM, "waf-app-" + ap.App.Name},
-	}
-	if ap.Twin != "" {
-		b["force_domain_override"] = true
 	}
 	for _, f := range wantFields(ap.App) {
 		if f.want != nil {
@@ -737,9 +799,16 @@ func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
 			continue
 		}
 		if ap.Create {
-			uuid, err := api.CreateApplication(ctx, createBody(ap, cfg))
+			// Coolify contrôle les domaines avant toute écriture : le second essai
+			// ne double rien.
+			body := createBody(ap, cfg)
+			uuid, err := api.CreateApplication(ctx, body)
+			if err != nil && ap.onlyTwins(err) {
+				body["force_domain_override"] = true
+				uuid, err = api.CreateApplication(ctx, body)
+			}
 			if err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, err)
+				return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
 			}
 			ap.UUID = uuid
 			if err := checkAppDestination(ctx, api, uuid, cfg); err != nil {
@@ -753,11 +822,13 @@ func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
 		}
 		if len(ap.patch) > 0 {
 			patch := withGithubApp(ap.patch, cfg)
-			if _, ok := patch["domains"]; ok && ap.Twin != "" {
+			err := api.UpdateApplication(ctx, ap.UUID, patch)
+			if _, dom := patch["domains"]; err != nil && dom && ap.onlyTwins(err) {
 				patch["force_domain_override"] = true
+				err = api.UpdateApplication(ctx, ap.UUID, patch)
 			}
-			if err := api.UpdateApplication(ctx, ap.UUID, patch); err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, err)
+			if err != nil {
+				return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
 			}
 		}
 		var ws []coolify.EnvWrite

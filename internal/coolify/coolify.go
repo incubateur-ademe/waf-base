@@ -53,6 +53,17 @@ type HTTPError struct {
 	Path   string
 	Status int
 	Body   string
+	// Conflicts : conflits de domaine d'un 409, lus avant la troncature du corps.
+	Conflicts []DomainConflict
+}
+
+// DomainConflict : un domaine déjà porté dans l'équipe. ResourceUUID est null
+// pour une ressource que le jeton ne voit pas et pour l'instance Coolify.
+type DomainConflict struct {
+	Domain       string  `json:"domain"`
+	ResourceName string  `json:"resource_name"`
+	ResourceUUID *string `json:"resource_uuid"`
+	ResourceType string  `json:"resource_type"`
 }
 
 func (e *HTTPError) Error() string {
@@ -147,7 +158,16 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 			}
 			msg = msg[:cut] + "…"
 		}
-		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: msg}
+		he := &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: msg}
+		if resp.StatusCode == http.StatusConflict {
+			var c struct {
+				Conflicts []DomainConflict `json:"conflicts"`
+			}
+			if json.Unmarshal(raw, &c) == nil {
+				he.Conflicts = c.Conflicts
+			}
+		}
+		return he
 	}
 	if out == nil {
 		return nil

@@ -213,8 +213,9 @@ func (f *fakeCoolify) addServerShared(server, key string, value *string) *fakeSh
 	return s
 }
 
-// domainConflict rend l'app qui porte déjà un des hosts de domains, hors de l'app self.
-func (f *fakeCoolify) domainConflict(self string, domains any) string {
+// domainConflicts rend, au format du 409 de Coolify 4.7.5, les apps qui portent
+// déjà un des hosts de domains, hors de l'app self.
+func (f *fakeCoolify) domainConflicts(self string, domains any) []map[string]any {
 	hosts := func(v any) map[string]bool {
 		out := map[string]bool{}
 		s, _ := v.(string)
@@ -228,17 +229,27 @@ func (f *fakeCoolify) domainConflict(self string, domains any) string {
 		return out
 	}
 	want := hosts(domains)
+	var out []map[string]any
 	for u, a := range f.apps {
 		if u == self {
 			continue
 		}
 		for h := range hosts(a.data["fqdn"]) {
 			if want[h] {
-				return fmt.Sprint(a.data["name"])
+				out = append(out, map[string]any{"domain": h, "resource_name": a.data["name"], "resource_uuid": u,
+					"resource_type": "application", "message": fmt.Sprintf("Domain %s is already in use by application '%s'", h, a.data["name"])})
 			}
 		}
 	}
-	return ""
+	return out
+}
+
+func conflict409(w http.ResponseWriter, c []map[string]any) {
+	write(w, 409, map[string]any{
+		"message":   "Domain conflicts detected. Use force_domain_override=true to proceed.",
+		"conflicts": c,
+		"warning":   "Using the same domain for multiple resources can cause routing conflicts and unpredictable behavior.",
+	})
 }
 
 func (f *fakeCoolify) shared(key string) *fakeShared {
@@ -395,8 +406,8 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u := reApp.FindStringSubmatch(p)[1]
 		a := f.apps[u]
 		if d, ok := body["domains"]; ok && body["force_domain_override"] != true {
-			if o := f.domainConflict(u, d); o != "" {
-				write(w, 409, map[string]any{"message": "Domain conflicts detected.", "conflicts": []string{o}})
+			if c := f.domainConflicts(u, d); len(c) > 0 {
+				conflict409(w, c)
 				return
 			}
 		}
@@ -492,8 +503,8 @@ func (f *fakeCoolify) create(w http.ResponseWriter, body map[string]any) {
 		return
 	}
 	if body["force_domain_override"] != true {
-		if o := f.domainConflict("", body["domains"]); o != "" {
-			write(w, 409, map[string]any{"message": "Domain conflicts detected.", "conflicts": []string{o}})
+		if c := f.domainConflicts("", body["domains"]); len(c) > 0 {
+			conflict409(w, c)
 			return
 		}
 	}

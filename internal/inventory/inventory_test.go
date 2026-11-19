@@ -50,8 +50,8 @@ func TestInventaireDuRepo(t *testing.T) {
 
 const vms = `
 vms:
-  1: { stage: prod, ip: 192.0.2.10 }
-  preprod: { stage: preprod, ip: 198.51.100.20 }
+  1: { stage: prod, ip: 78.232.54.148 }
+  preprod: { stage: preprod, ip: 51.15.20.30 }
 `
 
 const base = vms + `defaults:
@@ -190,7 +190,7 @@ func TestStages(t *testing.T) {
 	if inv.Apps[0].Stage != StageProd || inv.Apps[1].Stage != StagePreprod {
 		t.Fatalf("stages : %q, %q", inv.Apps[0].Stage, inv.Apps[1].Stage)
 	}
-	want := []VM{{Name: "1", Stage: StageProd, IP: "192.0.2.10"}, {Name: "preprod", Stage: StagePreprod, IP: "198.51.100.20"}}
+	want := []VM{{Name: "1", Stage: StageProd, IP: "78.232.54.148"}, {Name: "preprod", Stage: StagePreprod, IP: "51.15.20.30"}}
 	if len(inv.VMs) != 2 || inv.VMs[0] != want[0] || inv.VMs[1] != want[1] {
 		t.Fatalf("vms : %+v", inv.VMs)
 	}
@@ -235,15 +235,19 @@ func TestErreurs(t *testing.T) {
 		{"edge dans defaults", strings.Replace(app("    edge: cloudflare\n"), "defaults:\n", "defaults:\n  edge: cloudflare\n", 1), "edge propre à une app, interdit dans defaults"},
 		{"stage inconnu", app("    stage: staging\n"), `stage "staging" : prod ou preprod`},
 		{"stage dans defaults", strings.Replace(app(""), "defaults:\n", "defaults:\n  stage: preprod\n", 1), "stage propre à une app, interdit dans defaults"},
-		{"stage sans VM", strings.Replace(app("    stage: preprod\n"), "  preprod: { stage: preprod, ip: 198.51.100.20 }\n", "", 1), "aucune VM du stage preprod"},
+		{"stage sans VM", strings.Replace(app("    stage: preprod\n"), "  preprod: { stage: preprod, ip: 51.15.20.30 }\n", "", 1), "aucune VM du stage preprod"},
 		{"vms absent", strings.Replace(app(""), vms, "", 1), "vms manquant"},
 		{"nom de vm", strings.Replace(app(""), "  preprod:", "  Pre_prod:", 1), `vm "Pre_prod"`},
 		{"stage de vm", strings.Replace(app(""), "{ stage: preprod,", "{ stage: recette,", 1), `stage "recette"`},
-		{"ip de vm privée", strings.Replace(app(""), "198.51.100.20", "172.16.12.5", 1), "IPv4 publique attendue"},
-		{"ip de vm en IPv6", strings.Replace(app(""), "198.51.100.20", "2001:db8::1", 1), "IPv4 publique attendue"},
-		{"ip de vm illisible", strings.Replace(app(""), "198.51.100.20", "198.51.100.020", 1), "IPv4 publique attendue"},
-		{"ip de vm en double", strings.Replace(app(""), "198.51.100.20", "192.0.2.10", 1), "portée par les vm 1 et preprod"},
-		{"champ de vm inconnu", strings.Replace(app(""), "ip: 198.51.100.20 }", "ip: 198.51.100.20, server: x }", 1), "server"},
+		{"ip de vm privée", strings.Replace(app(""), "51.15.20.30", "172.16.12.5", 1), "IPv4 publique attendue"},
+		{"ip de vm en IPv6", strings.Replace(app(""), "51.15.20.30", "2001:db8::1", 1), "IPv4 publique attendue"},
+		{"ip de vm illisible", strings.Replace(app(""), "51.15.20.30", "198.51.100.020", 1), "IPv4 publique attendue"},
+		{"ip de vm en CGNAT", strings.Replace(app(""), "51.15.20.30", "100.64.1.1", 1), "IPv4 publique attendue"},
+		{"ip de vm de documentation", strings.Replace(app(""), "51.15.20.30", "192.0.2.1", 1), "IPv4 publique attendue"},
+		{"ip de vm réservée", strings.Replace(app(""), "51.15.20.30", "240.0.0.1", 1), "IPv4 publique attendue"},
+		{"ip de vm en 0/8", strings.Replace(app(""), "51.15.20.30", "0.1.2.3", 1), "IPv4 publique attendue"},
+		{"ip de vm en double", strings.Replace(app(""), "51.15.20.30", "78.232.54.148", 1), "portée par les vm 1 et preprod"},
+		{"champ de vm inconnu", strings.Replace(app(""), "ip: 51.15.20.30 }", "ip: 51.15.20.30, server: x }", 1), "server"},
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {
