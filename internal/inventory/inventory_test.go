@@ -23,6 +23,9 @@ func platforms(t *testing.T) map[string]bool {
 	return out
 }
 
+// Le fichier du repo change à chaque mise en service : ce test n'en vérifie que les
+// invariants. La fusion des défauts, canonical et edge ont leurs tests sur des
+// inventaires factices.
 func TestInventaireDuRepo(t *testing.T) {
 	b, err := os.ReadFile("../../inventaire.yaml")
 	if err != nil {
@@ -32,34 +35,16 @@ func TestInventaireDuRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(apps) != 3 || apps[0].Name != "tacct" || apps[1].Name != "tacct-preprod" || apps[2].Name != "waf-pilote" {
-		t.Fatalf("apps = %+v", apps)
+	if len(apps) == 0 {
+		t.Fatal("inventaire du repo sans app")
 	}
-	p := apps[2]
-	if p.Branch != "main" || p.WafDir != "waf" || p.Memory != "512M" || p.CPUWeight != 64 || !p.Live || p.HostHeader != "visitor" {
-		t.Fatalf("défauts mal fusionnés : %+v", p)
-	}
-	for _, a := range apps[:2] {
-		if a.HostHeader != "upstream" || a.Repo != "incubateur-ademe/tacct" {
-			t.Fatalf("valeurs de %s : %+v", a.Name, a)
+	for _, a := range apps {
+		if _, err := render.ParseHosts(strings.Join(a.Hosts, ",")); err != nil {
+			t.Fatalf("%s : WAF_HOSTS illisible par wafgen run : %v", a.Name, err)
 		}
-	}
-	if !apps[0].Live || !apps[1].Live {
-		t.Fatalf("live : tacct %v, tacct-preprod %v", apps[0].Live, apps[1].Live)
-	}
-	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "" || p.Canonical != "" {
-		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
-	}
-	if apps[0].Edge != "cloudflare" || apps[1].Edge != "cloudflare" || apps[2].Edge != "" {
-		t.Fatalf("edge : tacct %q, tacct-preprod %q, waf-pilote %q", apps[0].Edge, apps[1].Edge, apps[2].Edge)
-	}
-	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
-	if got := p.Ceilings.Env(); got != want {
-		t.Fatalf("WAF_CEILINGS = %q, attendu %q", got, want)
-	}
-	c, err := render.ParseCeilings(p.Ceilings.Env())
-	if err != nil || c != render.DefaultCeilings() {
-		t.Fatalf("WAF_CEILINGS relu = %+v, %v ; attendu les défauts de render", c, err)
+		if _, err := render.ParseCeilings(a.Ceilings.Env()); err != nil {
+			t.Fatalf("%s : WAF_CEILINGS illisible par wafgen run : %v", a.Name, err)
+		}
 	}
 }
 
