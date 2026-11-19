@@ -20,6 +20,7 @@ func TestRoutes(t *testing.T) {
 		{"GET", "/api/v1/destinations/d1"},
 		{"GET", "/api/v1/github-apps"},
 		{"GET", "/api/v1/team/envs"},
+		{"GET", "/api/v1/servers/s1/envs"},
 		{"POST", "/api/v1/applications/private-github-app"},
 		{"PATCH", "/api/v1/applications/abc123"},
 		{"PATCH", "/api/v1/applications/abc123/envs/bulk"},
@@ -96,6 +97,32 @@ func erreurHTTP(t *testing.T, token, body string) (*HTTPError, error) {
 		t.Fatalf("erreur = %v", err)
 	}
 	return he, err
+}
+
+func TestConflitsDeDomaine(t *testing.T) {
+	long := strings.Repeat("x", 400)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Domain conflicts detected. ` + long + `","conflicts":[` +
+			`{"domain":"a.example.org","resource_name":"waf-a-1","resource_uuid":"u1","resource_type":"application","message":"m"},` +
+			`{"domain":"a.example.org","resource_name":"another resource","resource_uuid":null,"resource_type":"service","message":"m"}]}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, "1|jeton")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.UpdateApplication(context.Background(), "abc", map[string]any{"domains": "https://a.example.org"})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != 409 || len(he.Conflicts) != 2 {
+		t.Fatalf("erreur = %v, conflits = %+v", err, he)
+	}
+	if c0 := he.Conflicts[0]; c0.ResourceUUID == nil || *c0.ResourceUUID != "u1" || c0.ResourceName != "waf-a-1" || c0.Domain != "a.example.org" {
+		t.Fatalf("premier conflit : %+v", c0)
+	}
+	if he.Conflicts[1].ResourceUUID != nil {
+		t.Fatalf("conflit masqué avec un uuid : %+v", he.Conflicts[1])
+	}
 }
 
 func TestJetonAChevalDeLaTroncature(t *testing.T) {

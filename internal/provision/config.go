@@ -16,13 +16,16 @@ type Config struct {
 	GithubAppUUID   string
 	VM              string
 	BaseRef         string
+	// OtherVMs : les autres VM de l'inventaire. Une app de même nom sur l'une
+	// d'elles est un jumeau, qui porte déjà les domaines de l'app.
+	OtherVMs []string
 }
 
 const DefaultBaseRef = "{{team.WAF_BASE}}"
 
 var (
 	reUUID        = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	reVM          = regexp.MustCompile(`^[1-9][0-9]?$`)
+	reVM          = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
 	reEnvironment = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
@@ -80,7 +83,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("WAF_OPS_ENVIRONMENT invalide")
 	}
 	if !reVM.MatchString(c.VM) {
-		return Config{}, fmt.Errorf("WAF_OPS_VM %q : numéro de VM attendu", c.VM)
+		return Config{}, fmt.Errorf("WAF_OPS_VM %q : nom d'une VM de l'inventaire attendu", c.VM)
 	}
 	return c, nil
 }
