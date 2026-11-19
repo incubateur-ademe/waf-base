@@ -5,6 +5,7 @@
 # stage: preprod, optionnel, jamais dans defaults : l'app tourne sur les VM du stage preprod ; prod par défaut.
 vms:
   "1": { stage: prod, ip: 78.232.54.148 }
+  preprod: { stage: preprod, ip: 78.232.51.183 }
 defaults:
   ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
   host_header: visitor
@@ -37,3 +38,4 @@ apps:
     host_header: visitor
     crs_plugins: []
     live: true
+    stage: preprod

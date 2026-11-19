@@ -507,6 +507,10 @@ func TestVariableRequiseManquante(t *testing.T) {
 func TestMainPlanSeul(t *testing.T) {
 	f, srv := newFake(t, testToken)
 	pilotApp(f)
+	inv := t.TempDir() + "/inventaire.yaml"
+	if err := os.WriteFile(inv, []byte(testInventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env := map[string]string{
 		"COOLIFY_URL":              srv.URL,
 		"COOLIFY_TOKEN":            testToken,
@@ -516,7 +520,7 @@ func TestMainPlanSeul(t *testing.T) {
 		"WAF_OPS_GITHUB_APP_UUID":  ghAppUUID,
 	}
 	var out, errw bytes.Buffer
-	err := Main(context.Background(), []string{"--etc", "../..", "--inventaire", "../../inventaire.yaml", "--app", "waf-pilote"},
+	err := Main(context.Background(), []string{"--etc", "../..", "--inventaire", inv, "--app", "waf-pilote"},
 		func(k string) string { return env[k] }, &out, &errw)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errw.String())
@@ -526,11 +530,11 @@ func TestMainPlanSeul(t *testing.T) {
 	}
 	s := out.String()
 	mustContain(t, s, "waf-waf-pilote-1", "stop_grace_period", "plan seul")
-	if strings.Contains(s, "tacct") || strings.Contains(s+errw.String(), testToken) {
+	if strings.Contains(s, "koyo") || strings.Contains(s+errw.String(), testToken) {
 		t.Fatalf("sortie :\n%s", s)
 	}
 
-	err = Main(context.Background(), []string{"--etc", "../..", "--inventaire", "../../inventaire.yaml", "--app", "inconnue"},
+	err = Main(context.Background(), []string{"--etc", "../..", "--inventaire", inv, "--app", "inconnue"},
 		func(k string) string { return env[k] }, &out, &errw)
 	if err == nil || !strings.Contains(err.Error(), "absente de l'inventaire") {
 		t.Fatalf("erreur = %v", err)
