@@ -44,7 +44,7 @@ func TestInventaireDuRepo(t *testing.T) {
 			t.Fatalf("valeurs de %s : %+v", a.Name, a)
 		}
 	}
-	if apps[0].Live || !apps[1].Live {
+	if !apps[0].Live || !apps[1].Live {
 		t.Fatalf("live : tacct %v, tacct-preprod %v", apps[0].Live, apps[1].Live)
 	}
 	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "" || p.Canonical != "" {
