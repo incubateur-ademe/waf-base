@@ -50,7 +50,7 @@ func TestInventaireDuRepo(t *testing.T) {
 	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "" || p.Canonical != "" {
 		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
 	}
-	if apps[0].Edge != "" || apps[1].Edge != "cloudflare" || apps[2].Edge != "" {
+	if apps[0].Edge != "cloudflare" || apps[1].Edge != "cloudflare" || apps[2].Edge != "" {
 		t.Fatalf("edge : tacct %q, tacct-preprod %q, waf-pilote %q", apps[0].Edge, apps[1].Edge, apps[2].Edge)
 	}
 	want := "events_per_second=100,upload_max_size=100MiB,detection_only_max_days=14"
