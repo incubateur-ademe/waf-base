@@ -23,7 +23,7 @@ apps:
     canonical: tacct.incubateur.ademe.dev
     host_header: upstream
     crs_plugins: []
-    live: false
+    live: true
   waf-pilote:
     repo: incubateur-ademe/waf-pilote
     platform: scalingo
