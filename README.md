@@ -6,7 +6,8 @@ Le design est dans le dossier finops (`waf-coraza-design.md`, sections 5 à 8).
 ## Contenu
 
 - `main.go` : Caddy 2.11.9 avec coraza-caddy v2.6.2 et caddy-ratelimit `5625512f`, Coraza épinglé au commit `12c67370`.
-- `cmd/wafgen`, `internal/` : `wafgen check` (lint des formes, rendu fictif, `caddy validate`, attaque canonique en mémoire), `wafgen run` (rendu depuis les variables ops, contrôles de démarrage, drain à l'arrêt), `wafgen rev`.
+- `cmd/wafgen`, `internal/` : `wafgen check` (lint des formes, rendu fictif, `caddy validate`, attaque canonique en mémoire), `wafgen run` (rendu depuis les variables ops, contrôles de démarrage, drain à l'arrêt), `wafgen rev`, `wafgen provision`.
+- `ops/Dockerfile`, `internal/ops` : image et commande `wafgen ops` du conteneur `waf-ops` d'outils. Boucle toutes les 5 minutes : pour chaque app `live` et Scalingo des stages de `WAF_OPS_STAGES`, règles du firewall Scalingo égales aux IP des VM de son stage si `LOCK_<APP>` est posée, chaque host rattaché à l'app en `host_header: visitor`, puis pulse updown (`waf-ops-ok`, ou `waf-ops-ko:` et les écarts) et état dans `/var/lib/waf-ops/etat.json`. L'app et la région Scalingo viennent de `UPSTREAM_<APP>`. L'API Scalingo passe par FGP : un blob d'API de lecture par région, tous chiffrés avec la clé `WAF_OPS_FGP_KEY` ; `wafgen ops fgp-scopes` rend les demandes de blobs. `wafgen ops controle` fait un passage à la demande, sans pulse.
 - `caddy/Caddyfile` : options globales, serveur `:2020` (santé, métriques, mode), catch-all 421. Les routes d'une app sont ajoutées en JSON par `wafgen run`.
 - `coraza/` : conf recommandée de Coraza 3.8.1 (SHA-256 vérifié au build), `10-moteur`, `20-planchers`, `90-garde-fous`.
 - `crs/` : version et SHA-256 de la CRS 4.25.2 LTS, téléchargée et vérifiée au build.

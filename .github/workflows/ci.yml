@@ -32,15 +32,20 @@ jobs:
       - run: docker build -t waf-base:ci .
       - run: tests/e2e/run.sh waf-base:ci
       - run: docker build -f ops/Dockerfile -t waf-ops:ci .
-      - name: wafgen provision sans variables sort en erreur, sans réseau
+      - name: wafgen ops et provision sans variables sortent en erreur, sans réseau
         run: |
           set +e
           out="$(docker run --rm --network none waf-ops:ci 2>&1)"
           rc=$?
+          prov="$(docker run --rm --network none waf-ops:ci /usr/bin/wafgen provision 2>&1)"
+          rcp=$?
           set -e
           echo "$out"
+          echo "$prov"
           test "$rc" -ne 0
-          grep -q "variables manquantes : COOLIFY_URL, COOLIFY_TOKEN" <<<"$out"
+          test "$rcp" -ne 0
+          grep -q "variables manquantes : COOLIFY_URL, COOLIFY_TOKEN, WAF_OPS_STAGES, WAF_OPS_FGP, WAF_OPS_FGP_KEY, WAF_OPS_PULSE_URL" <<<"$out"
+          grep -q "variables manquantes : COOLIFY_URL, COOLIFY_TOKEN" <<<"$prov"
   workflows:
     runs-on: ubuntu-24.04
     steps:
