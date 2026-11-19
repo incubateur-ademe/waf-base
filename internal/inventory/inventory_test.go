@@ -48,8 +48,13 @@ func TestInventaireDuRepo(t *testing.T) {
 	}
 }
 
-const base = `
-defaults:
+const vms = `
+vms:
+  1: { stage: prod, ip: 78.232.54.148 }
+  preprod: { stage: preprod, ip: 51.15.20.30 }
+`
+
+const base = vms + `defaults:
   ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
   host_header: visitor
   branch: main
@@ -103,8 +108,7 @@ func TestSurcharge(t *testing.T) {
 }
 
 func TestSansDefauts(t *testing.T) {
-	y := `
-apps:
+	y := vms + `apps:
   solo:
     repo: incubateur-ademe/solo
     platform: scalingo
@@ -120,7 +124,7 @@ apps:
 	if err != nil || c != render.DefaultCeilings() {
 		t.Fatalf("plafonds par défaut : %+v, %v", c, err)
 	}
-	if apps[0].WafDir != "waf" || apps[0].HostHeader != "visitor" {
+	if apps[0].WafDir != "waf" || apps[0].HostHeader != "visitor" || apps[0].Stage != StageProd {
 		t.Fatalf("défauts intégrés : %+v", apps[0])
 	}
 }
@@ -167,6 +171,37 @@ func TestEdge(t *testing.T) {
 	}
 }
 
+func TestStages(t *testing.T) {
+	y := base + `
+  app-a:
+    repo: incubateur-ademe/a
+    platform: scalingo
+    hosts: [a.example.org]
+  app-b:
+    repo: incubateur-ademe/b
+    platform: scalingo
+    hosts: [b.example.org]
+    stage: preprod
+`
+	inv, err := Load([]byte(y), platforms(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.Apps[0].Stage != StageProd || inv.Apps[1].Stage != StagePreprod {
+		t.Fatalf("stages : %q, %q", inv.Apps[0].Stage, inv.Apps[1].Stage)
+	}
+	want := []VM{{Name: "1", Stage: StageProd, IP: "78.232.54.148"}, {Name: "preprod", Stage: StagePreprod, IP: "51.15.20.30"}}
+	if len(inv.VMs) != 2 || inv.VMs[0] != want[0] || inv.VMs[1] != want[1] {
+		t.Fatalf("vms : %+v", inv.VMs)
+	}
+	if v, ok := inv.VM("preprod"); !ok || v != want[1] {
+		t.Fatalf("VM(preprod) : %+v, %t", v, ok)
+	}
+	if _, ok := inv.VM("2"); ok {
+		t.Fatal("VM(2) trouvée")
+	}
+}
+
 func TestErreurs(t *testing.T) {
 	app := func(extra string) string {
 		return base + "  app-a:\n    repo: incubateur-ademe/a\n    platform: scalingo\n    hosts: [a.example.org]\n" + extra
@@ -198,6 +233,21 @@ func TestErreurs(t *testing.T) {
 		{"edge inconnu", app("    edge: fastly\n"), `edge "fastly" : cloudflare seule valeur admise`},
 		{"edge en majuscules", app("    edge: Cloudflare\n"), "cloudflare seule valeur admise"},
 		{"edge dans defaults", strings.Replace(app("    edge: cloudflare\n"), "defaults:\n", "defaults:\n  edge: cloudflare\n", 1), "edge propre à une app, interdit dans defaults"},
+		{"stage inconnu", app("    stage: staging\n"), `stage "staging" : prod ou preprod`},
+		{"stage dans defaults", strings.Replace(app(""), "defaults:\n", "defaults:\n  stage: preprod\n", 1), "stage propre à une app, interdit dans defaults"},
+		{"stage sans VM", strings.Replace(app("    stage: preprod\n"), "  preprod: { stage: preprod, ip: 51.15.20.30 }\n", "", 1), "aucune VM du stage preprod"},
+		{"vms absent", strings.Replace(app(""), vms, "", 1), "vms manquant"},
+		{"nom de vm", strings.Replace(app(""), "  preprod:", "  Pre_prod:", 1), `vm "Pre_prod"`},
+		{"stage de vm", strings.Replace(app(""), "{ stage: preprod,", "{ stage: recette,", 1), `stage "recette"`},
+		{"ip de vm privée", strings.Replace(app(""), "51.15.20.30", "172.16.12.5", 1), "IPv4 publique attendue"},
+		{"ip de vm en IPv6", strings.Replace(app(""), "51.15.20.30", "2001:db8::1", 1), "IPv4 publique attendue"},
+		{"ip de vm illisible", strings.Replace(app(""), "51.15.20.30", "198.51.100.020", 1), "IPv4 publique attendue"},
+		{"ip de vm en CGNAT", strings.Replace(app(""), "51.15.20.30", "100.64.1.1", 1), "IPv4 publique attendue"},
+		{"ip de vm de documentation", strings.Replace(app(""), "51.15.20.30", "192.0.2.1", 1), "IPv4 publique attendue"},
+		{"ip de vm réservée", strings.Replace(app(""), "51.15.20.30", "240.0.0.1", 1), "IPv4 publique attendue"},
+		{"ip de vm en 0/8", strings.Replace(app(""), "51.15.20.30", "0.1.2.3", 1), "IPv4 publique attendue"},
+		{"ip de vm en double", strings.Replace(app(""), "51.15.20.30", "78.232.54.148", 1), "portée par les vm 1 et preprod"},
+		{"champ de vm inconnu", strings.Replace(app(""), "ip: 51.15.20.30 }", "ip: 51.15.20.30, server: x }", 1), "server"},
 	}
 	for _, c := range cases {
 		t.Run(c.nom, func(t *testing.T) {

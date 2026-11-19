@@ -32,6 +32,7 @@ var routes = []route{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/destinations/` + seg + `$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/github-apps$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/team/envs$`)},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/servers/` + seg + `/envs$`)},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/applications/private-github-app$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `/envs/bulk$`)},
@@ -52,6 +53,17 @@ type HTTPError struct {
 	Path   string
 	Status int
 	Body   string
+	// Conflicts : conflits de domaine d'un 409, lus avant la troncature du corps.
+	Conflicts []DomainConflict
+}
+
+// DomainConflict : un domaine déjà porté dans l'équipe. ResourceUUID est null
+// pour une ressource que le jeton ne voit pas et pour l'instance Coolify.
+type DomainConflict struct {
+	Domain       string  `json:"domain"`
+	ResourceName string  `json:"resource_name"`
+	ResourceUUID *string `json:"resource_uuid"`
+	ResourceType string  `json:"resource_type"`
 }
 
 func (e *HTTPError) Error() string {
@@ -146,7 +158,16 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 			}
 			msg = msg[:cut] + "…"
 		}
-		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: msg}
+		he := &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: msg}
+		if resp.StatusCode == http.StatusConflict {
+			var c struct {
+				Conflicts []DomainConflict `json:"conflicts"`
+			}
+			if json.Unmarshal(raw, &c) == nil {
+				he.Conflicts = c.Conflicts
+			}
+		}
+		return he
 	}
 	if out == nil {
 		return nil
@@ -274,4 +295,9 @@ func (c *Client) UpsertApplicationEnvs(ctx context.Context, uuid string, envs []
 func (c *Client) ListTeamEnvs(ctx context.Context) ([]SharedEnv, error) {
 	var out []SharedEnv
 	return out, c.do(ctx, http.MethodGet, "/api/v1/team/envs", nil, &out)
+}
+
+func (c *Client) ListServerEnvs(ctx context.Context, uuid string) ([]SharedEnv, error) {
+	var out []SharedEnv
+	return out, c.do(ctx, http.MethodGet, "/api/v1/servers/"+uuid+"/envs", nil, &out)
 }

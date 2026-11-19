@@ -17,7 +17,8 @@ import (
 // variable, chaîne vide convertie en null, réglages d'app rangés sous settings,
 // suppression de variable refusée (le jeton SecOps n'a pas l'ability delete).
 // Une variable d'équipe vide n'entre que par la vue développeur de l'UI : POST
-// /team/envs la refuse en HTTP 500 (colonne value NOT NULL).
+// /team/envs la refuse en HTTP 500 (colonne value NOT NULL). Un domaine déjà
+// porté par une autre app de l'équipe donne 409, sauf avec force_domain_override.
 type fakeCoolify struct {
 	t     *testing.T
 	token string
@@ -27,6 +28,7 @@ type fakeCoolify struct {
 	dests    map[string]fakeDest
 	ghApps   []map[string]any
 	team     []*fakeShared
+	server   map[string][]*fakeShared
 	requests int
 	writes   []string
 	nextID   int
@@ -72,9 +74,11 @@ func newFake(t *testing.T, token string) (*fakeCoolify, *httptest.Server) {
 		token: token,
 		apps:  map[string]*fakeApp{},
 		dests: map[string]fakeDest{
-			"dest-waf":     {"waf-1-waf", "waf", "srv-waf-1"},
-			"dest-coolify": {"waf-1-coolify", "coolify", "srv-waf-1"},
+			"dest-waf":         {"waf-1-waf", "waf", "srv-waf-1"},
+			"dest-coolify":     {"waf-1-coolify", "coolify", "srv-waf-1"},
+			"dest-waf-preprod": {"waf-preprod-waf", "waf", "srv-waf-preprod"},
 		},
+		server: map[string][]*fakeShared{"srv-waf-1": nil, "srv-waf-preprod": nil},
 		ghApps: []map[string]any{
 			{"id": 3, "uuid": "gh-autre"},
 			{"id": 7, "uuid": ghAppUUID, "client_secret": "ne-doit-pas-sortir"},
@@ -86,6 +90,9 @@ func newFake(t *testing.T, token string) (*fakeCoolify, *httptest.Server) {
 		for _, w := range f.writes {
 			if strings.HasPrefix(w, "POST /api/v1/team/envs") || strings.Contains(w, "/team/envs/") {
 				t.Errorf("écriture d'une variable d'équipe : %s", w)
+			}
+			if strings.HasPrefix(w, "POST /api/v1/servers/") || strings.Contains(w, "/envs/") && strings.Contains(w, "/servers/") {
+				t.Errorf("écriture d'une variable de serveur : %s", w)
 			}
 		}
 	})
@@ -199,6 +206,52 @@ func (f *fakeCoolify) addShared(key string, value *string) *fakeShared {
 	return s
 }
 
+func (f *fakeCoolify) addServerShared(server, key string, value *string) *fakeShared {
+	f.nextID++
+	s := &fakeShared{ID: f.nextID, Key: key, Value: value}
+	f.server[server] = append(f.server[server], s)
+	return s
+}
+
+// domainConflicts rend, au format du 409 de Coolify 4.7.5, les apps qui portent
+// déjà un des hosts de domains, hors de l'app self.
+func (f *fakeCoolify) domainConflicts(self string, domains any) []map[string]any {
+	hosts := func(v any) map[string]bool {
+		out := map[string]bool{}
+		s, _ := v.(string)
+		for _, d := range strings.Split(s, ",") {
+			d = strings.TrimSpace(strings.ToLower(d))
+			d = strings.TrimPrefix(strings.TrimPrefix(d, "https://"), "http://")
+			if d = strings.TrimRight(d, "/"); d != "" {
+				out[d] = true
+			}
+		}
+		return out
+	}
+	want := hosts(domains)
+	var out []map[string]any
+	for u, a := range f.apps {
+		if u == self {
+			continue
+		}
+		for h := range hosts(a.data["fqdn"]) {
+			if want[h] {
+				out = append(out, map[string]any{"domain": h, "resource_name": a.data["name"], "resource_uuid": u,
+					"resource_type": "application", "message": fmt.Sprintf("Domain %s is already in use by application '%s'", h, a.data["name"])})
+			}
+		}
+	}
+	return out
+}
+
+func conflict409(w http.ResponseWriter, c []map[string]any) {
+	write(w, 409, map[string]any{
+		"message":   "Domain conflicts detected. Use force_domain_override=true to proceed.",
+		"conflicts": c,
+		"warning":   "Using the same domain for multiple resources can cause routing conflicts and unpredictable behavior.",
+	})
+}
+
 func (f *fakeCoolify) shared(key string) *fakeShared {
 	for _, s := range f.team {
 		if s.Key == key {
@@ -238,6 +291,7 @@ var (
 	reAppEnv  = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs/([A-Za-z0-9_-]+)$`)
 	reAppDest = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/destinations$`)
 	reDest    = regexp.MustCompile(`^/api/v1/destinations/([A-Za-z0-9_-]+)$`)
+	reSrvEnvs = regexp.MustCompile(`^/api/v1/servers/([A-Za-z0-9_-]+)/envs$`)
 )
 
 func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +364,21 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = append(out, m)
 		}
 		write(w, 200, out)
+	case r.Method == "GET" && reSrvEnvs.MatchString(p):
+		list, ok := f.server[reSrvEnvs.FindStringSubmatch(p)[1]]
+		if !ok {
+			write(w, 404, map[string]any{"message": "Server not found."})
+			return
+		}
+		out := []map[string]any{}
+		for _, s := range list {
+			m := map[string]any{"id": s.ID, "key": s.Key, "is_literal": false, "is_shown_once": s.Locked, "type": "server"}
+			if !s.Locked && !s.Hidden {
+				m["value"] = s.Value
+			}
+			out = append(out, m)
+		}
+		write(w, 200, out)
 	case r.Method == "POST" && p == "/api/v1/team/envs":
 		for k := range body {
 			if k != "key" && k != "value" {
@@ -334,9 +403,17 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "POST" && p == "/api/v1/applications/private-github-app":
 		f.create(w, body)
 	case r.Method == "PATCH" && reApp.MatchString(p):
-		a := f.apps[reApp.FindStringSubmatch(p)[1]]
+		u := reApp.FindStringSubmatch(p)[1]
+		a := f.apps[u]
+		if d, ok := body["domains"]; ok && body["force_domain_override"] != true {
+			if c := f.domainConflicts(u, d); len(c) > 0 {
+				conflict409(w, c)
+				return
+			}
+		}
 		for k, v := range body {
 			switch {
+			case k == "force_domain_override":
 			case f.ignorePatch[k]:
 			case k == "domains":
 				a.data["fqdn"] = v
@@ -424,6 +501,12 @@ func (f *fakeCoolify) create(w http.ResponseWriter, body map[string]any) {
 	if _, ok := f.dests[dest]; !ok {
 		write(w, 422, map[string]any{"message": "Destination not found."})
 		return
+	}
+	if body["force_domain_override"] != true {
+		if c := f.domainConflicts("", body["domains"]); len(c) > 0 {
+			conflict409(w, c)
+			return
+		}
 	}
 	d := coolifyDefaults()
 	uuid := f.id("app")
