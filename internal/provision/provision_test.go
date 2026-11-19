@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 const testToken = "7|jeton-coolify-de-test-qui-ne-doit-jamais-sortir"
 
 const testInventory = `
+vms:
+  "1": { stage: prod, ip: 192.0.2.10 }
+  preprod: { stage: preprod, ip: 198.51.100.20 }
 defaults:
   ceilings: { events_per_second: 100, upload_max_size: 100MiB, detection_only_max_days: 14 }
   host_header: visitor
@@ -545,9 +549,187 @@ func TestConfigDefauts(t *testing.T) {
 	if c.Environment != "production" || c.VM != "1" || c.BaseRef != "{{team.WAF_BASE}}" {
 		t.Fatalf("défauts : %+v", c)
 	}
-	env["WAF_OPS_VM"] = "x"
-	if _, err := LoadConfig(func(k string) string { return env[k] }); err == nil {
-		t.Fatal("WAF_OPS_VM invalide acceptée")
+	for _, vm := range []string{"preprod", "2"} {
+		env["WAF_OPS_VM"] = vm
+		if c, err := LoadConfig(func(k string) string { return env[k] }); err != nil || c.VM != vm {
+			t.Fatalf("WAF_OPS_VM %q : %+v, %v", vm, c, err)
+		}
+	}
+	for _, vm := range []string{"Preprod", "waf_1", "waf-1", "vm-de-plus-de-seize"} {
+		env["WAF_OPS_VM"] = vm
+		if _, err := LoadConfig(func(k string) string { return env[k] }); err == nil {
+			t.Fatalf("WAF_OPS_VM %q acceptée", vm)
+		}
+	}
+}
+
+// stagesInventory : le pilote passe sur la VM de preprod, koyo reste en prod.
+const stagesInventory = `
+vms:
+  "1": { stage: prod, ip: 192.0.2.10 }
+  preprod: { stage: preprod, ip: 198.51.100.20 }
+apps:
+  waf-pilote:
+    repo: incubateur-ademe/waf-pilote
+    platform: scalingo
+    hosts: [waf-pilote.incubateur.ademe.dev]
+    branch: main
+    resources: { memory: 512M, cpu_weight: 64 }
+    live: true
+    stage: preprod
+  koyo:
+    repo: incubateur-ademe/koyo
+    platform: koyeb
+    hosts: [koyo.example.org]
+    branch: main
+    resources: { memory: 512M, cpu_weight: 64 }
+`
+
+func TestMainStages(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	inv := t.TempDir() + "/inventaire.yaml"
+	if err := os.WriteFile(inv, []byte(stagesInventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{
+		"COOLIFY_URL":              srv.URL,
+		"COOLIFY_TOKEN":            testToken,
+		"WAF_OPS_PROJECT_UUID":     "proj-waf",
+		"WAF_OPS_SERVER_UUID":      "srv-waf-1",
+		"WAF_OPS_DESTINATION_UUID": "dest-waf",
+		"WAF_OPS_GITHUB_APP_UUID":  ghAppUUID,
+	}
+	main := func(args ...string) (string, error) {
+		var out, errw bytes.Buffer
+		err := Main(context.Background(), append([]string{"--etc", "../..", "--inventaire", inv}, args...),
+			func(k string) string { return env[k] }, &out, &errw)
+		return out.String(), err
+	}
+
+	out, err := main()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, "waf-koyo-1 : création")
+	if strings.Contains(out, "waf-pilote") {
+		t.Fatalf("app de preprod traitée sur la VM 1 :\n%s", out)
+	}
+	if _, err := main("--app", "waf-pilote"); err == nil || !strings.Contains(err.Error(), "app waf-pilote en stage preprod, VM 1 en stage prod") {
+		t.Fatalf("erreur = %v", err)
+	}
+
+	env["WAF_OPS_VM"], env["WAF_OPS_SERVER_UUID"], env["WAF_OPS_DESTINATION_UUID"] = "preprod", "srv-waf-preprod", "dest-waf-preprod"
+	out, err = main()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur une autre VM")
+	if strings.Contains(out, "koyo") {
+		t.Fatalf("app de prod traitée sur la VM preprod :\n%s", out)
+	}
+
+	env["WAF_OPS_VM"] = "2"
+	if _, err := main(); err == nil || !strings.Contains(err.Error(), `VM "2" absente de vms`) {
+		t.Fatalf("erreur = %v", err)
+	}
+	if len(f.writes) != 0 {
+		t.Fatalf("écritures sans --apply : %v", f.writes)
+	}
+}
+
+func preprodConfig(url string) Config {
+	c := testConfig(url)
+	c.VM, c.ServerUUID, c.DestinationUUID, c.OtherVMs = "preprod", "srv-waf-preprod", "dest-waf-preprod", []string{"1"}
+	return c
+}
+
+func runCfg(t *testing.T, cfg Config, apps []inventory.App, apply bool) (string, error) {
+	t.Helper()
+	c, err := coolify.New(cfg.URL, testToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = Run(context.Background(), c, cfg, apps, apply, &out)
+	if strings.Contains(out.String(), testToken) || (err != nil && strings.Contains(err.Error(), testToken)) {
+		t.Fatalf("jeton dans la sortie")
+	}
+	return out.String(), err
+}
+
+// Le pilote migre de waf-1 vers la VM de preprod : son jumeau -1 tient encore le
+// domaine, que Coolify refuse sans force_domain_override.
+func TestJumeauSurUneAutreVM(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	f.addShared("UPSTREAM_WAF_PILOTE", ptr(pilotUpstream))
+	apps := testApps(t, "waf-pilote")
+
+	sans := preprodConfig(srv.URL)
+	sans.OtherVMs = nil
+	if _, err := runCfg(t, sans, apps, true); err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("création sans jumeau connu : %v", err)
+	}
+
+	out, err := runCfg(t, preprodConfig(srv.URL), apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "waf-waf-pilote-preprod : création", "jumeau waf-waf-pilote-1 sur une autre VM : domaines posés avec force_domain_override", "idempotence vérifiée")
+	a := f.appByName("waf-waf-pilote-preprod")
+	if a == nil || a.dest != "dest-waf-preprod" || a.data["fqdn"] != "https://waf-pilote.incubateur.ademe.dev" {
+		t.Fatalf("app preprod : %+v", a)
+	}
+	if strings.Count(strings.Join(f.bodies, "\n"), `"force_domain_override":true`) != 1 {
+		t.Fatalf("force_domain_override absent de la création :\n%s", strings.Join(f.bodies, "\n"))
+	}
+	if strings.Contains(out[strings.Index(out, "second calcul"):], "jumeau") {
+		t.Fatalf("note de jumeau sans écriture de domaine :\n%s", out)
+	}
+
+	// Un changement de domaine sur l'app existante repasse l'option.
+	a.data["fqdn"] = "http://waf-pilote.incubateur.ademe.dev"
+	n := len(f.bodies)
+	out, err = runCfg(t, preprodConfig(srv.URL), apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(strings.Join(f.bodies[n:], "\n"), `"force_domain_override":true`) {
+		t.Fatalf("PATCH des domaines sans force_domain_override :\n%s", strings.Join(f.bodies[n:], "\n"))
+	}
+}
+
+func TestBaseParServeur(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	pilotApp(f)
+	f.addShared("UPSTREAM_WAF_PILOTE", ptr(pilotUpstream))
+	apps := testApps(t, "waf-pilote")
+	cfg := testConfig(srv.URL)
+	cfg.BaseRef = "{{server.WAF_BASE}}"
+
+	out, err := runCfg(t, cfg, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "action ops : créer WAF_BASE avec sa valeur dans l'UI Coolify (variables partagées du serveur), puis relancer provision")
+	if v := f.appByName("waf-waf-pilote-1").env("WAF_BASE"); v == nil || *v.Value != "{{team.WAF_BASE}}" {
+		t.Fatalf("WAF_BASE changée sans variable de serveur : %+v", v)
+	}
+
+	f.addServerShared("srv-waf-1", "WAF_BASE", ptr("ghcr.io/incubateur-ademe/waf-base@sha256:4a96"))
+	out, err = runCfg(t, cfg, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, `~ env WAF_BASE : "{{team.WAF_BASE}}" -> "{{server.WAF_BASE}}"`, "idempotence vérifiée")
+	if v := f.appByName("waf-waf-pilote-1").env("WAF_BASE"); v == nil || *v.Value != "{{server.WAF_BASE}}" || !v.Buildtime || v.Runtime {
+		t.Fatalf("WAF_BASE : %+v", v)
+	}
+
+	cfg.ServerUUID, cfg.DestinationUUID = "srv-inconnu", "dest-waf"
+	if _, err := runCfg(t, cfg, apps, false); err == nil {
+		t.Fatal("destination d'un autre serveur acceptée")
 	}
 }
 

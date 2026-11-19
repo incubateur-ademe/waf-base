@@ -32,6 +32,7 @@ var routes = []route{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/destinations/` + seg + `$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/github-apps$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/team/envs$`)},
+	{http.MethodGet, regexp.MustCompile(`^/api/v1/servers/` + seg + `/envs$`)},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/applications/private-github-app$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `/envs/bulk$`)},
@@ -274,4 +275,9 @@ func (c *Client) UpsertApplicationEnvs(ctx context.Context, uuid string, envs []
 func (c *Client) ListTeamEnvs(ctx context.Context) ([]SharedEnv, error) {
 	var out []SharedEnv
 	return out, c.do(ctx, http.MethodGet, "/api/v1/team/envs", nil, &out)
+}
+
+func (c *Client) ListServerEnvs(ctx context.Context, uuid string) ([]SharedEnv, error) {
+	var out []SharedEnv
+	return out, c.do(ctx, http.MethodGet, "/api/v1/servers/"+uuid+"/envs", nil, &out)
 }

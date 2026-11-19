@@ -26,6 +26,7 @@ type API interface {
 	ListApplicationEnvs(ctx context.Context, uuid string) ([]coolify.Env, error)
 	UpsertApplicationEnvs(ctx context.Context, uuid string, envs []coolify.EnvWrite) error
 	ListTeamEnvs(ctx context.Context) ([]coolify.SharedEnv, error)
+	ListServerEnvs(ctx context.Context, uuid string) ([]coolify.SharedEnv, error)
 }
 
 // Réseau Docker de la destination par défaut d'un serveur Coolify : un WAF qui
@@ -107,7 +108,9 @@ type envWant struct {
 	value     string
 	buildtime bool
 	shared    string
-	required  bool
+	// scope : portée de la variable partagée, scopeTeam par défaut.
+	scope    string
+	required bool
 	// omitEmpty : sans valeur voulue, la variable n'est pas créée, et une valeur
 	// en place est vidée plutôt que supprimée, le jeton SecOps n'ayant pas
 	// l'ability delete. Coolify stocke null, que wafgen run lit comme absente.
@@ -133,13 +136,21 @@ func (w envWant) failure(gateIdle bool) (would, does string) {
 	return "wafgen run refuserait de démarrer", "wafgen run refuse de démarrer"
 }
 
-// baseShared renvoie la clé d'équipe quand BaseRef n'est qu'une référence d'équipe.
-func baseShared(cfg Config) string {
-	m := reTeamRef.FindStringSubmatch(cfg.BaseRef)
-	if m == nil || m[0] != strings.TrimSpace(cfg.BaseRef) {
-		return ""
+const (
+	scopeTeam   = "team"
+	scopeServer = "server"
+)
+
+var reBaseRef = regexp.MustCompile(`^\{\{\s*(team|server)\.([A-Za-z0-9_]+)\s*\}\}$`)
+
+// baseRef rend la portée et la clé quand BaseRef n'est qu'une référence
+// d'équipe ou de serveur. Une variable de serveur donne sa base à chaque VM.
+func baseRef(cfg Config) (scope, key string) {
+	m := reBaseRef.FindStringSubmatch(strings.TrimSpace(cfg.BaseRef))
+	if m == nil {
+		return "", ""
 	}
-	return m[1]
+	return m[1], m[2]
 }
 
 func wantEnvs(app inventory.App, cfg Config) []envWant {
@@ -171,8 +182,8 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 		}
 	}
 	base := envWant{key: "WAF_BASE", value: cfg.BaseRef, buildtime: true}
-	if k := baseShared(cfg); k != "" {
-		base.shared, base.required = k, true
+	if scope, k := baseRef(cfg); k != "" {
+		base.shared, base.scope, base.required = k, scope, true
 	}
 	return append(out, base)
 }
@@ -189,9 +200,12 @@ type EnvChange struct {
 }
 
 type AppPlan struct {
-	App    inventory.App
-	Name   string
-	UUID   string
+	App  inventory.App
+	Name string
+	UUID string
+	// Twin : app de même nom sur une autre VM, qui tient déjà les domaines.
+	// Coolify refuse alors les domaines sans force_domain_override.
+	Twin   string
 	Create bool
 	Fields []Change
 	Envs   []EnvChange
@@ -229,6 +243,28 @@ type shared struct {
 	known  bool
 	empty  bool
 	locked bool
+	scope  string
+}
+
+type sharedVars struct {
+	team, server map[string]coolify.SharedEnv
+}
+
+func (v sharedVars) state(scope, key string) shared {
+	m := v.team
+	if scope == scopeServer {
+		m = v.server
+	}
+	st := sharedState(m, key)
+	st.scope = scope
+	return st
+}
+
+func (s shared) where() string {
+	if s.scope == scopeServer {
+		return "variables partagées du serveur"
+	}
+	return "variables partagées de l'équipe"
 }
 
 // filled dit si la clé existe et n'est pas connue vide. Une valeur illisible
@@ -265,9 +301,9 @@ func (s shared) state() string {
 // absente, la remplir si elle existe vide (l'UI refuse de recréer une clé existante).
 func (s shared) opsAction(key string) string {
 	if s.exists {
-		return fmt.Sprintf("action ops : remplir %s dans l'UI Coolify (variables partagées de l'équipe)", key)
+		return fmt.Sprintf("action ops : remplir %s dans l'UI Coolify (%s)", key, s.where())
 	}
-	return fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (variables partagées de l'équipe)", key)
+	return fmt.Sprintf("action ops : créer %s avec sa valeur dans l'UI Coolify (%s)", key, s.where())
 }
 
 func (s shared) unreadable(key string) string {
@@ -449,13 +485,24 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 	if err != nil {
 		return nil, err
 	}
-	team := map[string]coolify.SharedEnv{}
+	vars := sharedVars{team: map[string]coolify.SharedEnv{}}
 	for _, e := range teamList {
-		team[e.Key] = e
+		vars.team[e.Key] = e
 	}
-	if baseShared(cfg) == "" {
+	scope, key := baseRef(cfg)
+	if scope == scopeServer {
+		srvList, err := api.ListServerEnvs(ctx, cfg.ServerUUID)
+		if err != nil {
+			return nil, err
+		}
+		vars.server = map[string]coolify.SharedEnv{}
+		for _, e := range srvList {
+			vars.server[e.Key] = e
+		}
+	}
+	if key == "" {
 		for _, m := range reTeamRef.FindAllStringSubmatch(cfg.BaseRef, -1) {
-			if st := sharedState(team, m[1]); !st.filled() {
+			if st := sharedState(vars.team, m[1]); !st.filled() {
 				p.Notes = append(p.Notes, st.opsAction(m[1])+", puis relancer provision ; sans elle, tout build échoue")
 			}
 		}
@@ -465,7 +512,7 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 		return nil, err
 	}
 	for _, app := range apps {
-		ap, err := computeApp(ctx, api, cfg, app, list, team, p.githubAppID)
+		ap, err := computeApp(ctx, api, cfg, app, list, vars, p.githubAppID)
 		if err != nil {
 			return nil, fmt.Errorf("%s : %w", ResourceName(app, cfg.VM), err)
 		}
@@ -485,14 +532,21 @@ func orphan(v string, team map[string]coolify.SharedEnv) bool {
 	return false
 }
 
-func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, list []coolify.AppSummary, team map[string]coolify.SharedEnv, ghID int64) (AppPlan, error) {
+func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, list []coolify.AppSummary, vars sharedVars, ghID int64) (AppPlan, error) {
 	ap := AppPlan{App: app, Name: ResourceName(app, cfg.VM)}
+	twins := map[string]bool{}
+	for _, v := range cfg.OtherVMs {
+		twins[ResourceName(app, v)] = true
+	}
 	for _, a := range list {
 		if a.Name == ap.Name {
 			if ap.UUID != "" {
 				return ap, fmt.Errorf("plusieurs apps Coolify portent ce nom")
 			}
 			ap.UUID = a.UUID
+		}
+		if twins[a.Name] && ap.Twin == "" {
+			ap.Twin = a.Name
 		}
 	}
 	current := map[string]coolify.Env{}
@@ -534,7 +588,7 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		value := w.value
 		var st shared
 		if w.shared != "" {
-			st = sharedState(team, w.shared)
+			st = vars.state(w.scope, w.shared)
 		}
 		e, ok := current[w.key]
 		if ok && !e.Value.Set {
@@ -567,7 +621,7 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 				valueOK, literalKept = true, true
 			}
 		}
-		if w.shared != "" && ok && !st.exists && orphan(old, team) {
+		if w.shared != "" && ok && !st.exists && orphan(old, vars.team) {
 			if !w.required {
 				// Vidée par le bulk plutôt que supprimée : le jeton SecOps n'a pas
 				// l'ability delete. Coolify stocke null, que wafgen run lit comme absente.
@@ -624,6 +678,11 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		}
 		ap.Envs = append(ap.Envs, EnvChange{Key: w.key, Old: oldS, New: newS, Write: write})
 	}
+	if ap.Twin != "" {
+		if _, ok := ap.patch["domains"]; ap.Create || ok {
+			ap.Notes = append(ap.Notes, fmt.Sprintf("jumeau %s sur une autre VM : domaines posés avec force_domain_override", ap.Twin))
+		}
+	}
 	var extra []string
 	for k := range current {
 		if !wanted[k] {
@@ -650,6 +709,9 @@ func createBody(ap *AppPlan, cfg Config) map[string]any {
 		"autogenerate_domain": false,
 		"instant_deploy":      false,
 		"tags":                []string{"waf", "waf-" + cfg.VM, "waf-app-" + ap.App.Name},
+	}
+	if ap.Twin != "" {
+		b["force_domain_override"] = true
 	}
 	for _, f := range wantFields(ap.App) {
 		if f.want != nil {
@@ -690,7 +752,11 @@ func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
 			_, ap.patch = fieldChanges(cur, ap.App, p.githubAppID)
 		}
 		if len(ap.patch) > 0 {
-			if err := api.UpdateApplication(ctx, ap.UUID, withGithubApp(ap.patch, cfg)); err != nil {
+			patch := withGithubApp(ap.patch, cfg)
+			if _, ok := patch["domains"]; ok && ap.Twin != "" {
+				patch["force_domain_override"] = true
+			}
+			if err := api.UpdateApplication(ctx, ap.UUID, patch); err != nil {
 				return fmt.Errorf("%s : %w", ap.Name, err)
 			}
 		}

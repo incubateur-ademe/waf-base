@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"regexp"
 	"slices"
@@ -44,6 +45,7 @@ type entry struct {
 	Hosts          []string   `yaml:"hosts"`
 	Canonical      *string    `yaml:"canonical"`
 	Edge           *string    `yaml:"edge"`
+	Stage          *string    `yaml:"stage"`
 	HostHeader     *string    `yaml:"host_header"`
 	CRSPlugins     *[]string  `yaml:"crs_plugins"`
 	Live           *bool      `yaml:"live"`
@@ -54,9 +56,43 @@ type entry struct {
 	InternalEvents *int       `yaml:"internal_events"`
 }
 
+type vmEntry struct {
+	Stage string `yaml:"stage"`
+	IP    string `yaml:"ip"`
+}
+
 type file struct {
-	Defaults entry            `yaml:"defaults"`
-	Apps     map[string]entry `yaml:"apps"`
+	VMs      map[string]vmEntry `yaml:"vms"`
+	Defaults entry              `yaml:"defaults"`
+	Apps     map[string]entry   `yaml:"apps"`
+}
+
+const (
+	StageProd    = "prod"
+	StagePreprod = "preprod"
+)
+
+// VM est une VM WAF. Elle porte les apps de son stage, et son IP est celle que
+// le firewall de ces apps autorise.
+type VM struct {
+	Name  string
+	Stage string
+	IP    string
+}
+
+type Inventory struct {
+	Apps []App
+	VMs  []VM
+}
+
+// VM rend la VM de ce nom.
+func (inv Inventory) VM(name string) (VM, bool) {
+	for _, v := range inv.VMs {
+		if v.Name == name {
+			return v, true
+		}
+	}
+	return VM{}, false
 }
 
 type Ceilings struct {
@@ -78,6 +114,7 @@ type App struct {
 	Hosts          []string
 	Canonical      string
 	Edge           string
+	Stage          string
 	HostHeader     string
 	CRSPlugins     []string
 	Live           bool
@@ -107,25 +144,43 @@ var (
 	reMemory  = regexp.MustCompile(`^[1-9][0-9]{0,5}[MG]$`)
 	rePlugin  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 	reDotDots = regexp.MustCompile(`(^|/)\.\.?(/|$)`)
+	reVMName  = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
 )
 
-// Parse lit l'inventaire, fusionne les défauts dans chaque app et valide le
-// résultat. platforms liste les plateformes de policy/origines.yaml.
+// Parse rend les apps de l'inventaire, lu et validé par Load.
 func Parse(b []byte, platforms map[string]bool) ([]App, error) {
+	inv, err := Load(b, platforms)
+	return inv.Apps, err
+}
+
+// Load lit l'inventaire, fusionne les défauts dans chaque app et valide le
+// résultat. platforms liste les plateformes de policy/origines.yaml.
+func Load(b []byte, platforms map[string]bool) (Inventory, error) {
 	var f file
 	d := yaml.NewDecoder(bytes.NewReader(b))
 	d.KnownFields(true)
 	if err := d.Decode(&f); err != nil {
-		return nil, fmt.Errorf("inventaire : %w", err)
+		return Inventory{}, fmt.Errorf("inventaire : %w", err)
 	}
 	if len(f.Apps) == 0 {
-		return nil, fmt.Errorf("inventaire : aucune app")
+		return Inventory{}, fmt.Errorf("inventaire : aucune app")
 	}
 	if f.Defaults.Canonical != nil {
-		return nil, fmt.Errorf("inventaire : canonical propre à une app, interdit dans defaults")
+		return Inventory{}, fmt.Errorf("inventaire : canonical propre à une app, interdit dans defaults")
 	}
 	if f.Defaults.Edge != nil {
-		return nil, fmt.Errorf("inventaire : edge propre à une app, interdit dans defaults")
+		return Inventory{}, fmt.Errorf("inventaire : edge propre à une app, interdit dans defaults")
+	}
+	if f.Defaults.Stage != nil {
+		return Inventory{}, fmt.Errorf("inventaire : stage propre à une app, interdit dans defaults")
+	}
+	vms, err := parseVMs(f.VMs)
+	if err != nil {
+		return Inventory{}, err
+	}
+	stages := map[string]bool{}
+	for _, v := range vms {
+		stages[v.Stage] = true
 	}
 	names := make([]string, 0, len(f.Apps))
 	for n := range f.Apps {
@@ -138,17 +193,59 @@ func Parse(b []byte, platforms map[string]bool) ([]App, error) {
 		a := merge(n, f.Defaults, f.Apps[n])
 		hosts, err := validate(a, platforms)
 		if err != nil {
-			return nil, fmt.Errorf("inventaire, app %s : %w", n, err)
+			return Inventory{}, fmt.Errorf("inventaire, app %s : %w", n, err)
+		}
+		if !stages[a.Stage] {
+			return Inventory{}, fmt.Errorf("inventaire, app %s : aucune VM du stage %s dans vms", n, a.Stage)
 		}
 		for _, h := range hosts {
 			if o, ok := owner[h]; ok {
-				return nil, fmt.Errorf("inventaire : host %s revendiqué par %s et %s", h, o, n)
+				return Inventory{}, fmt.Errorf("inventaire : host %s revendiqué par %s et %s", h, o, n)
 			}
 			owner[h] = n
 		}
 		apps = append(apps, a)
 	}
-	return apps, nil
+	return Inventory{Apps: apps, VMs: vms}, nil
+}
+
+// parseVMs valide les VM : nom repris dans celui des apps Coolify
+// (waf-<app>-<vm>) et dans le hostname waf-<vm> que lit waf-pulse, stage connu,
+// IPv4 publique propre à chaque VM.
+func parseVMs(in map[string]vmEntry) ([]VM, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("inventaire : vms manquant, une VM au moins")
+	}
+	names := make([]string, 0, len(in))
+	for n := range in {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	owner := map[netip.Addr]string{}
+	out := make([]VM, 0, len(names))
+	for _, n := range names {
+		v := in[n]
+		if !reVMName.MatchString(n) {
+			return nil, fmt.Errorf("inventaire, vm %q : minuscules et chiffres, 16 caractères au plus", n)
+		}
+		if !validStage(v.Stage) {
+			return nil, fmt.Errorf("inventaire, vm %s : stage %q, %s ou %s", n, v.Stage, StageProd, StagePreprod)
+		}
+		ip, err := netip.ParseAddr(v.IP)
+		if err != nil || !ip.Is4() || !ip.IsGlobalUnicast() || ip.IsPrivate() {
+			return nil, fmt.Errorf("inventaire, vm %s : ip %q, IPv4 publique attendue", n, v.IP)
+		}
+		if o, ok := owner[ip]; ok {
+			return nil, fmt.Errorf("inventaire : ip %s portée par les vm %s et %s", ip, o, n)
+		}
+		owner[ip] = n
+		out = append(out, VM{Name: n, Stage: v.Stage, IP: ip.String()})
+	}
+	return out, nil
+}
+
+func validStage(s string) bool {
+	return s == StageProd || s == StagePreprod
 }
 
 func pick[T any](app, def *T, fallback T) T {
@@ -168,6 +265,7 @@ func merge(name string, def, e entry) App {
 		Platform:       pick(e.Platform, def.Platform, ""),
 		Canonical:      pick(e.Canonical, nil, ""),
 		Edge:           pick(e.Edge, nil, ""),
+		Stage:          pick(e.Stage, nil, StageProd),
 		HostHeader:     pick(e.HostHeader, def.HostHeader, "visitor"),
 		CRSPlugins:     pick(e.CRSPlugins, def.CRSPlugins, nil),
 		Live:           pick(e.Live, def.Live, false),
@@ -258,6 +356,9 @@ func validateRest(a App, platforms map[string]bool) error {
 	}
 	if a.Edge != "" && a.Edge != render.EdgeCloudflare {
 		return fmt.Errorf("edge %q : %s seule valeur admise", a.Edge, render.EdgeCloudflare)
+	}
+	if !validStage(a.Stage) {
+		return fmt.Errorf("stage %q : %s ou %s", a.Stage, StageProd, StagePreprod)
 	}
 	if a.HostHeader != "visitor" && a.HostHeader != "upstream" {
 		return fmt.Errorf("host_header %q : visitor ou upstream", a.HostHeader)
