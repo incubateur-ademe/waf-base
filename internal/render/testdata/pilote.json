@@ -133,6 +133,18 @@
                       "handle": [
                         {
                           "handler": "headers",
+                          "request": {
+                            "delete": [
+                              "X-Ademe-Edge"
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
                           "response": {
                             "deferred": true,
                             "delete": [
@@ -291,6 +303,10 @@
                                   "handler": "reverse_proxy",
                                   "headers": {
                                     "request": {
+                                      "delete": [
+                                        "CF-Connecting-IP",
+                                        "X-Ademe-Edge"
+                                      ],
                                       "set": {
                                         "Host": [
                                           "{http.request.host}"
@@ -356,6 +372,33 @@
           },
           "trusted_proxies_strict": 1
         }
+      }
+    }
+  },
+  "logging": {
+    "logs": {
+      "default": {
+        "exclude": [
+          "http.log.access",
+          "http.log.error"
+        ]
+      },
+      "requetes": {
+        "encoder": {
+          "fields": {
+            "request\u003eheaders\u003eX-Ademe-Edge": {
+              "filter": "delete"
+            }
+          },
+          "format": "filter",
+          "wrap": {
+            "format": "json"
+          }
+        },
+        "include": [
+          "http.log.access",
+          "http.log.error"
+        ]
       }
     }
   }

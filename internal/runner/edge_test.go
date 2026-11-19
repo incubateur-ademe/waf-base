@@ -110,11 +110,11 @@ SecRule &REQUEST_HEADERS:X-Ademe-Edge "@gt 0" "id:101,phase:1,deny,status:418,lo
 SecRule REMOTE_ADDR "@ipMatch 198.51.100.66,2001:db8::66" "id:102,phase:1,deny,status:403,log"
 `
 
-// caddyEdge charge dans ce processus la conf rendue pour une app edge, avec ces
-// seuls écarts : ports locaux, serveur :2020 retiré, directives Coraza du test,
-// origine au certificat de test, rate limit appliqué aussi à la boucle locale et
-// logs écrits dans des fichiers.
-func caddyEdge(t *testing.T, origin string, logs string) (string, *render.Input) {
+// caddyEdge charge dans ce processus la conf rendue pour une app, edge ou non
+// selon edge, avec ces seuls écarts : ports locaux, serveur :2020 retiré,
+// directives Coraza du test, origine au certificat de test, rate limit appliqué
+// aussi à la boucle locale et logs écrits dans des fichiers.
+func caddyEdge(t *testing.T, origin, logs, edge string) (string, *render.Input) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -123,7 +123,7 @@ func caddyEdge(t *testing.T, origin string, logs string) (string, *render.Input)
 	waf.RateLimits.Zones = []tenant.Zone{{Name: "limite", Paths: []string{"/limite"}, Events: 2, Window: "1m"}}
 	in := &render.Input{
 		Etc: "/etc/waf", State: t.TempDir(), Tenant: "edge", Hosts: []string{"edge.example.org"},
-		HostHeader: "visitor", Platform: "scalingo", Upstream: origin, Edge: render.EdgeCloudflare,
+		HostHeader: "visitor", Platform: "scalingo", Upstream: origin, Edge: edge,
 		WAF: waf, TenantFiles: map[string]bool{}, Now: time.Now(),
 	}
 	base, err := os.ReadFile("../render/testdata/base.json")
@@ -186,7 +186,7 @@ func TestEdgeDansCaddy(t *testing.T) {
 	}))
 	defer origin.Close()
 	logs := t.TempDir()
-	base, in := caddyEdge(t, origin.URL, logs)
+	base, in := caddyEdge(t, origin.URL, logs, render.EdgeCloudflare)
 
 	const noeud = "203.0.113.50"
 	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
@@ -317,4 +317,76 @@ func TestEdgeDansCaddy(t *testing.T) {
 			t.Errorf("log d'erreur aussi écrit dans le log par défaut :\n%s", def)
 		}
 	})
+}
+
+// Sans edge, X-Ademe-Edge et CF-Connecting-IP ne changent pas l'IP du client et
+// n'atteignent ni Coraza, ni l'origine, ni les logs : une règle Cloudflare posée
+// avant le passage de l'app en edge ne fait pas fuir son secret.
+func TestSansEdgeDansCaddy(t *testing.T) {
+	t.Setenv("WAF_EDGE_SECRET", secretFactice)
+	var mu sync.Mutex
+	var vus []http.Header
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/coupe" {
+			panic(http.ErrAbortHandler)
+		}
+		mu.Lock()
+		vus = append(vus, r.Header.Clone())
+		mu.Unlock()
+	}))
+	defer origin.Close()
+	logs := t.TempDir()
+	base, _ := caddyEdge(t, origin.URL, logs, "")
+
+	const noeud = "203.0.113.50"
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	do := func(path string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+		req.Host = "edge.example.org"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-For", noeud)
+		req.Header.Set("X-Ademe-Edge", secretFactice)
+		req.Header.Set("CF-Connecting-IP", "198.51.100.66")
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	if st, body := do("/__waf/ip"); st != 200 || body != noeud {
+		t.Errorf("/__waf/ip : %d %q, attendu %q", st, body, noeud)
+	}
+	// 418 si X-Ademe-Edge atteint Coraza, 403 si CF-Connecting-IP devient REMOTE_ADDR.
+	if st, _ := do("/"); st != 200 {
+		t.Errorf("Coraza : %d, 200 attendu", st)
+	}
+	mu.Lock()
+	if len(vus) != 1 || vus[0].Get("X-Ademe-Edge") != "" || vus[0].Get("CF-Connecting-IP") != "" {
+		t.Errorf("en-têtes reçus par l'origine : %v", vus)
+	}
+	mu.Unlock()
+
+	if st, _ := do("/coupe"); st != 502 {
+		t.Fatalf("statut %d, 502 attendu", st)
+	}
+	var req string
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		b, _ := os.ReadFile(filepath.Join(logs, "requetes.log"))
+		if req = string(b); strings.Contains(req, `"/coupe"`) {
+			break
+		}
+	}
+	if !strings.Contains(req, `"/coupe"`) {
+		t.Fatalf("log d'erreur du 502 absent :\n%s", req)
+	}
+	def, _ := os.ReadFile(filepath.Join(logs, "default.log"))
+	for nom, s := range map[string]string{"requetes": req, "default": string(def)} {
+		if strings.Contains(s, secretFactice) || strings.Contains(s, "X-Ademe-Edge") {
+			t.Errorf("log %s avec X-Ademe-Edge :\n%s", nom, s)
+		}
+	}
 }
