@@ -17,7 +17,7 @@ apps:
     edge: cloudflare
     host_header: upstream
     crs_plugins: []
-    live: false
+    live: true
   tacct-preprod:
     repo: incubateur-ademe/tacct
     platform: scalingo
