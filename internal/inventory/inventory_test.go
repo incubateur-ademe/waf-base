@@ -40,9 +40,12 @@ func TestInventaireDuRepo(t *testing.T) {
 		t.Fatalf("défauts mal fusionnés : %+v", p)
 	}
 	for _, a := range apps[:2] {
-		if a.HostHeader != "upstream" || a.Live || a.Repo != "incubateur-ademe/tacct" {
+		if a.HostHeader != "upstream" || a.Repo != "incubateur-ademe/tacct" {
 			t.Fatalf("valeurs de %s : %+v", a.Name, a)
 		}
+	}
+	if apps[0].Live || !apps[1].Live {
+		t.Fatalf("live : tacct %v, tacct-preprod %v", apps[0].Live, apps[1].Live)
 	}
 	if apps[0].Canonical != "tacct.ademe.fr" || apps[1].Canonical != "tacct.incubateur.ademe.dev" || p.Canonical != "" {
 		t.Fatalf("canonical : %q, %q, %q", apps[0].Canonical, apps[1].Canonical, p.Canonical)
