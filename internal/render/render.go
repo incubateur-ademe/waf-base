@@ -236,10 +236,9 @@ func reverseProxy(in *Input) (obj, error) {
 		"X-Forwarded-For":   []string{"{http.vars.client_ip}"},
 		"X-Forwarded-Proto": []string{"https"},
 	}
-	request := obj{"set": set}
-	if in.Edge == EdgeCloudflare {
-		request["delete"] = []string{"CF-Connecting-IP", "X-Ademe-Edge"}
-	}
+	// Retirés pour toute app, edge ou non : une règle Cloudflare posée avant le
+	// passage de l'app en edge n'enverrait pas son secret à l'origine.
+	request := obj{"set": set, "delete": []string{"CF-Connecting-IP", "X-Ademe-Edge"}}
 	headers := obj{"request": request}
 	if in.Platform == "koyeb" {
 		set["X-Ademe-Waf"] = []string{"{env.ORIGIN_TOKEN}"}
@@ -317,26 +316,29 @@ func ipPattern() string {
 	return "^(?:" + strings.Join(alts, "|") + ")$"
 }
 
-// edgeRoutes remplace client_ip par CF-Connecting-IP quand X-Ademe-Edge porte
-// le secret posé par la zone Cloudflare de l'app, puis retire X-Ademe-Edge
-// avant Coraza. Le secret reste hors de la conf rendue : Caddy le lit dans
-// l'environnement que wafgen run a validé.
-func edgeRoutes() []any {
-	return []any{
-		obj{
-			"match": []any{obj{
-				"header":        obj{"X-Ademe-Edge": []string{"{env.WAF_EDGE_SECRET}"}},
-				"header_regexp": obj{"CF-Connecting-IP": obj{"name": "waf_edge", "pattern": edgeIP}},
-			}},
-			"handle": []any{obj{"handler": "vars", "client_ip": "{http.regexp.waf_edge.0}"}},
-		},
-		obj{"handle": []any{obj{"handler": "headers", "request": obj{"delete": []string{"X-Ademe-Edge"}}}}},
+// edgeRoute remplace client_ip par CF-Connecting-IP quand X-Ademe-Edge porte
+// le secret posé par la zone Cloudflare de l'app. Le secret reste hors de la
+// conf rendue : Caddy le lit dans l'environnement que wafgen run a validé.
+func edgeRoute() obj {
+	return obj{
+		"match": []any{obj{
+			"header":        obj{"X-Ademe-Edge": []string{"{env.WAF_EDGE_SECRET}"}},
+			"header_regexp": obj{"CF-Connecting-IP": obj{"name": "waf_edge", "pattern": edgeIP}},
+		}},
+		"handle": []any{obj{"handler": "vars", "client_ip": "{http.regexp.waf_edge.0}"}},
 	}
+}
+
+// edgeStrip retire X-Ademe-Edge avant Coraza, pour toute app : le secret d'une
+// règle Cloudflare posée avant le passage de l'app en edge n'atteint ni Coraza
+// ni son audit.
+func edgeStrip() obj {
+	return obj{"handle": []any{obj{"handler": "headers", "request": obj{"delete": []string{"X-Ademe-Edge"}}}}}
 }
 
 // edgeLogging retire X-Ademe-Edge des logs d'erreur et d'accès de Caddy, qui
 // copient les en-têtes de la requête avant le premier handler : un 502 de
-// l'origine journaliserait sinon le secret.
+// l'origine journaliserait sinon le secret. Posé pour toute app, comme edgeStrip.
 func edgeLogging() obj {
 	names := []string{"http.log.access", "http.log.error"}
 	return obj{"logs": obj{
@@ -377,9 +379,9 @@ func SiteRoute(in *Input) (obj, error) {
 	}
 	var routes []any
 	if in.Edge == EdgeCloudflare {
-		routes = edgeRoutes()
+		routes = append(routes, edgeRoute())
 	}
-	routes = append(routes, obj{"handle": socle})
+	routes = append(routes, edgeStrip(), obj{"handle": socle})
 	routes = append(routes, requestBody(in)...)
 	routes = append(routes, obj{
 		"match":  []any{obj{"header": obj{"X-Forwarded-Proto": []string{"http"}}}},
@@ -457,12 +459,10 @@ func Caddy(base []byte, in *Input) ([]byte, error) {
 	}
 	existing, _ := srv["routes"].([]any)
 	srv["routes"] = append([]any{route}, existing...)
-	if in.Edge == EdgeCloudflare {
-		if _, ok := cfg["logging"]; ok {
-			return nil, fmt.Errorf("conf de base : bloc logging inattendu, le filtre de X-Ademe-Edge le remplacerait")
-		}
-		cfg["logging"] = edgeLogging()
+	if _, ok := cfg["logging"]; ok {
+		return nil, fmt.Errorf("conf de base : bloc logging inattendu, le filtre de X-Ademe-Edge le remplacerait")
 	}
+	cfg["logging"] = edgeLogging()
 	return json.MarshalIndent(cfg, "", "  ")
 }
 

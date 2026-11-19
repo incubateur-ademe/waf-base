@@ -110,8 +110,8 @@ func outerRoutes(t *testing.T, in *Input) []json.RawMessage {
 func TestEdgeRoutes(t *testing.T) {
 	edge := outerRoutes(t, edgeInput())
 	sans := outerRoutes(t, testInput(tacctHosts, "tacct.ademe.fr", "upstream"))
-	if len(edge) != len(sans)+2 {
-		t.Fatalf("%d routes, %d attendues : deux routes d'edge en tête", len(edge), len(sans)+2)
+	if len(edge) != len(sans)+1 {
+		t.Fatalf("%d routes, %d attendues : la route du secret en tête", len(edge), len(sans)+1)
 	}
 	var first struct {
 		Match []struct {
@@ -138,10 +138,11 @@ func TestEdgeRoutes(t *testing.T) {
 	if !reflect.DeepEqual(first.Handle, want) || first.Terminal {
 		t.Fatalf("remplacement de client_ip : %s", edge[0])
 	}
-	if string(edge[1]) != `{"handle":[{"handler":"headers","request":{"delete":["X-Ademe-Edge"]}}]}` {
-		t.Fatalf("retrait de X-Ademe-Edge : %s", edge[1])
+	strip := `{"handle":[{"handler":"headers","request":{"delete":["X-Ademe-Edge"]}}]}`
+	if string(edge[1]) != strip || string(sans[0]) != strip {
+		t.Fatalf("retrait de X-Ademe-Edge avant Coraza, avec et sans edge : %s, %s", edge[1], sans[0])
 	}
-	rest, err := json.Marshal(edge[2:])
+	rest, err := json.Marshal(edge[1:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,9 +150,11 @@ func TestEdgeRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	del := []byte(`"delete":["CF-Connecting-IP","X-Ademe-Edge"],`)
-	if bytes.Count(rest, del) != 1 || !bytes.Equal(bytes.Replace(rest, del, nil, 1), ref) {
-		t.Fatalf("hors des deux routes d'edge, seul le reverse_proxy doit changer : retrait de CF-Connecting-IP et X-Ademe-Edge")
+	if !bytes.Equal(rest, ref) {
+		t.Fatalf("hors de la route du secret, une app edge et une app sans edge doivent avoir la même conf")
+	}
+	if bytes.Count(ref, []byte(`"delete":["CF-Connecting-IP","X-Ademe-Edge"]`)) != 1 {
+		t.Fatalf("reverse_proxy sans retrait de CF-Connecting-IP et X-Ademe-Edge vers l'origine")
 	}
 	if strings.Contains(string(siteJSON(t, edgeInput())), secretFactice) {
 		t.Fatal("secret dans la conf rendue")
@@ -233,7 +236,12 @@ func TestEdgeMatchers(t *testing.T) {
 }
 
 func TestEdgeLogging(t *testing.T) {
-	b, err := Caddy([]byte(`{"apps":{"http":{"servers":{"srv1":{"listen":[":8080"]}}}}}`), edgeInput())
+	t.Run("edge", func(t *testing.T) { edgeLoggingDe(t, edgeInput()) })
+	t.Run("sans edge", func(t *testing.T) { edgeLoggingDe(t, testInput(tacctHosts, "", "visitor")) })
+}
+
+func edgeLoggingDe(t *testing.T, in *Input) {
+	b, err := Caddy([]byte(`{"apps":{"http":{"servers":{"srv1":{"listen":[":8080"]}}}}}`), in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,14 +271,7 @@ func TestEdgeLogging(t *testing.T) {
 		t.Fatalf("encodeur : %+v", e)
 	}
 
-	sans, err := Caddy([]byte(`{"apps":{"http":{"servers":{"srv1":{"listen":[":8080"]}}}}}`), testInput(tacctHosts, "", "visitor"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(sans, []byte(`"logging"`)) {
-		t.Fatal("bloc logging rendu sans edge")
-	}
-	_, err = Caddy([]byte(`{"logging":{"logs":{}},"apps":{"http":{"servers":{"srv1":{"listen":[":8080"]}}}}}`), edgeInput())
+	_, err = Caddy([]byte(`{"logging":{"logs":{}},"apps":{"http":{"servers":{"srv1":{"listen":[":8080"]}}}}}`), in)
 	if err == nil || !strings.Contains(err.Error(), "logging") {
 		t.Fatalf("bloc logging de la base écrasé : %v", err)
 	}
