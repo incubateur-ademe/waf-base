@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,8 +25,13 @@ const (
 	etatFile   = "etat.json"
 )
 
-// PulseBody : « waf-ops-ok », ou « waf-ops-ko: » suivi des raisons. Le check
-// updown attend « waf-ops-ok », que la forme KO ne contient pas.
+// Le check updown cherche « waf-ops-ok » n'importe où dans le corps, sans
+// tenir compte de la casse. Les raisons reprennent des valeurs venues de
+// l'extérieur (UPSTREAM, inventaire, erreurs) : le marqueur y est cassé, sans
+// quoi un corps KO passerait pour OK.
+var rePulseOK = regexp.MustCompile(`(?i)waf-ops-ok`)
+
+// PulseBody : « waf-ops-ok », ou « waf-ops-ko: » suivi des raisons.
 func PulseBody(r Rapport, err error) string {
 	var raisons []string
 	if err != nil {
@@ -35,7 +41,7 @@ func PulseBody(r Rapport, err error) string {
 	if len(raisons) == 0 {
 		return PulseOK
 	}
-	b := pulseKO + strings.Join(raisons, " ; ")
+	b := pulseKO + rePulseOK.ReplaceAllString(strings.Join(raisons, " ; "), "waf-ops-o?k")
 	if len(b) <= maxPulseBody {
 		return b
 	}
@@ -106,12 +112,16 @@ func writeEtat(dir string, e Etat) error {
 	return writeAtomic(filepath.Join(dir, etatFile), append(b, '\n'), 0o600)
 }
 
-// Passage fait un contrôle, envoie le pulse et écrit l'état. Pendant un arrêt,
-// le pulse n'est pas envoyé : un passage coupé n'est pas un écart.
+// Passage fait un contrôle, envoie le pulse et écrit l'état. Un passage coupé
+// par l'arrêt n'est pas un écart : ni pulse, ni état, ni écarts dans les logs.
 func Passage(ctx context.Context, cfg Config, d Deps, p Pulser, logf func(string, ...any)) {
 	rctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 	r, err := Controle(rctx, cfg, d)
+	if ctx.Err() != nil {
+		logf("arrêt pendant le contrôle : passage abandonné, ni pulse ni état")
+		return
+	}
 	body := PulseBody(r, err)
 	for _, n := range r.Notes {
 		logf("note : %s", n)
@@ -124,14 +134,12 @@ func Passage(ctx context.Context, cfg Config, d Deps, p Pulser, logf func(string
 	}
 	logf("contrôle : %d app(s), %d écart(s)", r.Apps, len(r.Ecarts))
 	pulse := "non envoyé"
-	if ctx.Err() == nil {
-		if perr := p.Send(ctx, body); perr != nil {
-			logf("%v", perr)
-		} else if body == PulseOK {
-			pulse = PulseOK
-		} else {
-			pulse = "waf-ops-ko"
-		}
+	if perr := p.Send(ctx, body); perr != nil {
+		logf("%v", perr)
+	} else if body == PulseOK {
+		pulse = PulseOK
+	} else {
+		pulse = "waf-ops-ko"
 	}
 	e := Etat{Controle: EtatControle{A: d.Now().UTC(), Apps: r.Apps, Ecarts: r.Ecarts, Notes: r.Notes, Pulse: pulse}}
 	if e.Controle.Ecarts == nil {

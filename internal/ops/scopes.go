@@ -35,6 +35,10 @@ func Scopes(ctx context.Context, cfg Config, team TeamEnvs) (map[string]BlobRequ
 	if err != nil {
 		return nil, err
 	}
+	// Un blob vaut un an : il ne part que d'un inventaire relu, jamais du cache.
+	if r.Cache {
+		return nil, fmt.Errorf("scopes non générés, inventaire non relu : %s", strings.Join(r.Notes, " ; "))
+	}
 	envs, err := team.ListTeamEnvs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("variables d'équipe Coolify : %w", err)

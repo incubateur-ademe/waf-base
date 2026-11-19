@@ -113,6 +113,8 @@ func TestConfig(t *testing.T) {
 		{"FGP url à chemin", "WAF_OPS_FGP", `{"url":"https://fgp.example.org/x","api":{"osc-fr1":"b"}}`, "https"},
 		{"clé courte", "WAF_OPS_FGP_KEY", "courte", "WAF_OPS_FGP_KEY"},
 		{"pulse http", "WAF_OPS_PULSE_URL", "http://pulse.example.org/p/secret-token", "WAF_OPS_PULSE_URL"},
+		{"région et blob inversés", "WAF_OPS_FGP", `{"api":{"secret-token-blob":"osc-fr1"}}`, "clé de api"},
+		{"FGP url à identifiants", "WAF_OPS_FGP", `{"url":"https://u:secret-token@fgp.example.org/x","api":{"osc-fr1":"b"}}`, "url https"},
 	}
 	for _, cs := range cases {
 		t.Run(cs.nom, func(t *testing.T) {
@@ -483,9 +485,65 @@ func TestPassage(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	n := len(logs)
 	Passage(ctx, cfg, d, p, logf)
 	if len(p.bodies) != 1 {
 		t.Fatalf("pulse envoyé pendant l'arrêt : %v", p.bodies)
+	}
+	after, err := os.ReadFile(filepath.Join(cfg.State, etatFile))
+	if err != nil || !bytes.Equal(after, b) {
+		t.Fatalf("état réécrit par un passage coupé : %v\n%s", err, after)
+	}
+	if strings.Contains(strings.Join(logs[n:], "\n"), "écart") {
+		t.Fatalf("écarts journalisés par un passage coupé : %v", logs[n:])
+	}
+}
+
+func TestPulseMarqueur(t *testing.T) {
+	b := PulseBody(Rapport{Ecarts: []string{"x : app waf-ops-ok", "y : WAF-OPS-OK et Waf-Ops-Ok"}}, errors.New("waf-ops-ok"))
+	if !strings.HasPrefix(b, "waf-ops-ko: ") || strings.Contains(strings.ToLower(b), "waf-ops-ok") {
+		t.Fatalf("marqueur dans un corps KO : %q", b)
+	}
+
+	// Bout en bout : une UPSTREAM qui vise une app Scalingo nommée waf-ops-ok.
+	d, s := pilotDeps(t)
+	d.Coolify = fakeTeam{envs: []coolify.SharedEnv{
+		shared(t, "UPSTREAM_WAF_PILOTE", "https://waf-ops-ok.osc-fr1.scalingo.io", false),
+		shared(t, "LOCK_WAF_PILOTE", "x", false),
+	}}
+	s.err["waf-ops-ok"] = &FGPError{Path: "/v1/apps/waf-ops-ok/firewall_rules", Status: 403, Source: "proxy"}
+	r, err := Controle(context.Background(), testCfg(t), d)
+	if err != nil || len(r.Ecarts) == 0 {
+		t.Fatalf("rapport : %+v, %v", r, err)
+	}
+	if body := PulseBody(r, nil); strings.Contains(strings.ToLower(body), "waf-ops-ok") {
+		t.Fatalf("corps KO lu comme OK par updown : %q", body)
+	}
+}
+
+func TestDetailFGPJournalise(t *testing.T) {
+	d, s := pilotDeps(t, ipPP+"/32")
+	s.err["waf-pilote"] = fmt.Errorf("%w : GET /v1/apps/waf-pilote/firewall_rules : context deadline exceeded", ErrFGPInjoignable)
+	r, _ := Controle(context.Background(), testCfg(t), d)
+	if !strings.Contains(strings.Join(r.Notes, "\n"), "waf-pilote : détail : FGP injoignable : GET /v1/apps/waf-pilote/firewall_rules : context deadline exceeded") {
+		t.Fatalf("notes : %v", r.Notes)
+	}
+	if strings.Contains(PulseBody(r, nil), "deadline") {
+		t.Fatalf("détail dans le pulse : %q", PulseBody(r, nil))
+	}
+}
+
+func TestScalingoTarget(t *testing.T) {
+	for _, u := range []string{"https://waf-pilote.osc-fr1.scalingo.io", "https://waf-pilote.osc-fr1.scalingo.io/", "https://waf-pilote.osc-fr1.scalingo.io:443"} {
+		if app, region, err := scalingoTarget(u); err != nil || app != "waf-pilote" || region != "osc-fr1" {
+			t.Fatalf("%s : %s %s %v", u, app, region, err)
+		}
+	}
+	for _, u := range []string{"http://waf-pilote.osc-fr1.scalingo.io", "https://waf-pilote.osc-fr1.scalingo.io:8443", "https://waf-pilote.osc-fr1.scalingo.io/x",
+		"https://u:p@waf-pilote.osc-fr1.scalingo.io", "https://waf-pilote.scalingo.io", "https://evil.example.org"} {
+		if _, _, err := scalingoTarget(u); err == nil {
+			t.Fatalf("%s acceptée", u)
+		}
 	}
 }
 
@@ -512,6 +570,14 @@ func TestScopes(t *testing.T) {
 		"GET:/v1/apps/waf-pilote/firewall_rules,GET:/v1/apps/waf-pilote/domains,GET:/v1/apps/waf-pilote/events"
 	if strings.Join(fr1.Scopes, ",") != want {
 		t.Fatalf("scopes : %v", fr1.Scopes)
+	}
+
+	// Inventaire non relu : le cache, même frais, ne suffit pas à générer.
+	if err := os.Remove(cfg.Inventaire); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Scopes(context.Background(), cfg, team); err == nil || !strings.Contains(err.Error(), "scopes non générés, inventaire non relu") {
+		t.Fatalf("scopes depuis le cache : %v", err)
 	}
 }
 

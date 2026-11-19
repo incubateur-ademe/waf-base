@@ -146,7 +146,8 @@ func parseFGP(raw, key string) (FGP, error) {
 	}
 	u, err := url.Parse(f.URL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
-		return FGP{}, fmt.Errorf("WAF_OPS_FGP : url %q, https://<hôte> attendu", f.URL)
+		// L'URL peut porter des identifiants : elle n'entre pas dans le message.
+		return FGP{}, fmt.Errorf("WAF_OPS_FGP : url https://<hôte> attendue")
 	}
 	f.URL = "https://" + u.Host
 	if len(f.API) == 0 {
@@ -154,7 +155,8 @@ func parseFGP(raw, key string) (FGP, error) {
 	}
 	for region, blob := range f.API {
 		if !reRegion.MatchString(region) {
-			return FGP{}, fmt.Errorf("WAF_OPS_FGP : région %q invalide", region)
+			// Une région et son blob inversés citeraient le blob : la valeur reste hors du message.
+			return FGP{}, fmt.Errorf("WAF_OPS_FGP : clé de api hors de osc-<région>")
 		}
 		if blob == "" || len(blob) > maxBlob || strings.ContainsAny(blob, " \t\r\n") {
 			return FGP{}, fmt.Errorf("WAF_OPS_FGP : blob de %s vide, trop long ou avec des blancs", region)

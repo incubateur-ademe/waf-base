@@ -38,11 +38,13 @@ type Deps struct {
 	Now      func() time.Time
 }
 
-// Rapport : écarts à corriger, et notes qui n'en sont pas.
+// Rapport : écarts à corriger, et notes qui n'en sont pas. Cache dit que
+// l'inventaire vient du cache, faute d'une réponse valide.
 type Rapport struct {
 	Ecarts []string
 	Notes  []string
 	Apps   int
+	Cache  bool
 }
 
 func (r *Rapport) ecart(app, format string, a ...any) {
@@ -74,6 +76,7 @@ func loadInventory(ctx context.Context, cfg Config, now time.Time, r *Rapport) (
 		err = perr
 	}
 	r.Notes = append(r.Notes, fmt.Sprintf("inventaire non relu, cache utilisé : %v", err))
+	r.Cache = true
 	st, serr := os.Stat(cache)
 	if serr != nil {
 		return inventory.Inventory{}, fmt.Errorf("inventaire illisible et sans cache : %v", err)
@@ -125,7 +128,8 @@ var reUpstreamHost = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{0,62})\.(osc-[a-z0-
 // https://<app>.<région>.scalingo.io : l'inventaire public ne situe pas l'origine.
 func scalingoTarget(upstream string) (app, region string, err error) {
 	u, err := url.Parse(strings.TrimSpace(upstream))
-	if err != nil || u.Scheme != "https" || u.Port() != "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+	// :443 explicite reste admis : le rendu du WAF l'accepte.
+	if err != nil || u.Scheme != "https" || (u.Port() != "" && u.Port() != "443") || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
 		return "", "", fmt.Errorf("https://<app>.<région>.scalingo.io attendu")
 	}
 	m := reUpstreamHost.FindStringSubmatch(strings.ToLower(u.Hostname()))
@@ -234,6 +238,7 @@ func controleApp(ctx context.Context, d Deps, a inventory.App, team map[string]c
 		rules, err := d.Scalingo.FirewallRules(ctx, region, app)
 		if err != nil {
 			r.ecart(a.Name, "règles du firewall de %s : %s", where, fgpProblem(err))
+			r.Notes = append(r.Notes, fmt.Sprintf("%s : détail : %v", a.Name, err))
 		} else if missing, extra := diffRules(rules, want); len(missing)+len(extra) > 0 {
 			var parts []string
 			if len(missing) > 0 {
@@ -253,6 +258,7 @@ func controleApp(ctx context.Context, d Deps, a inventory.App, team map[string]c
 	doms, err := d.Scalingo.Domains(ctx, region, app)
 	if err != nil {
 		r.ecart(a.Name, "domaines de %s : %s", where, fgpProblem(err))
+		r.Notes = append(r.Notes, fmt.Sprintf("%s : détail : %v", a.Name, err))
 		return
 	}
 	have := map[string]bool{}
