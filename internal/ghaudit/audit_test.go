@@ -171,11 +171,21 @@ func TestGardes(t *testing.T) {
 		{"rulesets sans blocage de la suppression", func(_ *fakeGH, r *fakeRepo) {
 			r.protection = ""
 			r.rules = "[" + prRuleOK + `,{"type":"non_fast_forward","ruleset_id":42}]`
-		}, "rulesets sans blocage de la suppression de la branche"},
+		}, "ruleset 42 sans blocage de la suppression de la branche"},
+		{"suppression et force push bloqués par un autre ruleset", func(_ *fakeGH, r *fakeRepo) {
+			r.protection = ""
+			r.rules = "[" + prRuleOK + `,{"type":"deletion","ruleset_id":43},{"type":"non_fast_forward","ruleset_id":43}]`
+			r.rulesets["42"] = strings.Replace(rulesetNoB, `"rules":[]`, `"rules":[],"bypass_actors":[]`, 1)
+		}, "ruleset 42 sans blocage de la suppression de la branche"},
+		{"force push bloqué par un autre ruleset", func(_ *fakeGH, r *fakeRepo) {
+			r.protection = ""
+			r.rules = "[" + prRuleOK + `,{"type":"deletion","ruleset_id":42},{"type":"non_fast_forward","ruleset_id":43}]`
+			r.rulesets["42"] = strings.Replace(rulesetNoB, `"rules":[]`, `"rules":[],"bypass_actors":[]`, 1)
+		}, "ruleset 42 sans blocage du force push"},
 		{"rulesets sans blocage du force push", func(_ *fakeGH, r *fakeRepo) {
 			r.protection = ""
 			r.rules = "[" + prRuleOK + `,{"type":"deletion","ruleset_id":42}]`
-		}, "rulesets sans blocage du force push"},
+		}, "ruleset 42 sans blocage du force push"},
 		{"non appliquée aux admins", func(_ *fakeGH, r *fakeRepo) {
 			r.protection = strings.Replace(protOK, `"enforce_admins":{"enabled":true}`, `"enforce_admins":{"enabled":false}`, 1)
 		}, "non appliquée aux administrateurs"},

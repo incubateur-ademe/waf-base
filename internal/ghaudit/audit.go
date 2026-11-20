@@ -625,9 +625,14 @@ func (a *auditor) protection(ctx context.Context, tok string, t target, private 
 	if err != nil && !(planFree && isStatus(err, http.StatusForbidden)) {
 		return err
 	}
-	types := map[string]bool{}
+	// Les règles qui bloquent suppression et force push doivent venir du
+	// ruleset dont on vérifie les contournements, pas d'un autre.
+	types := map[int64]map[string]bool{}
 	for _, r := range rules {
-		types[r.Type] = true
+		if types[r.RulesetID] == nil {
+			types[r.RulesetID] = map[string]bool{}
+		}
+		types[r.RulesetID][r.Type] = true
 	}
 	seen := map[int64]bool{}
 	for _, r := range rules {
@@ -646,11 +651,11 @@ func (a *auditor) protection(ctx context.Context, tok string, t target, private 
 		case !p.DismissStale:
 			manques = append(manques, fmt.Sprintf("ruleset %d sans révocation des approbations au push", r.RulesetID))
 			continue
-		case !types["deletion"]:
-			manques = append(manques, "rulesets sans blocage de la suppression de la branche")
+		case !types[r.RulesetID]["deletion"]:
+			manques = append(manques, fmt.Sprintf("ruleset %d sans blocage de la suppression de la branche", r.RulesetID))
 			continue
-		case !types["non_fast_forward"]:
-			manques = append(manques, "rulesets sans blocage du force push")
+		case !types[r.RulesetID]["non_fast_forward"]:
+			manques = append(manques, fmt.Sprintf("ruleset %d sans blocage du force push", r.RulesetID))
 			continue
 		}
 		ok, why, err := a.rulesetLocks(ctx, tok, t, r.RulesetID)
