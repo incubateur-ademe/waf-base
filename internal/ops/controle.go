@@ -15,6 +15,7 @@ import (
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
 	"github.com/incubateur-ademe/waf-base/internal/policy"
+	"github.com/incubateur-ademe/waf-base/internal/provision"
 )
 
 // Au-delà, l'inventaire en cache ne vaut plus pour décider ce qui est attendu.
@@ -34,10 +35,13 @@ type Scalingo interface {
 }
 
 type Deps struct {
-	Coolify  TeamEnvs
-	Scalingo Scalingo
-	Origine  Origine
-	Now      func() time.Time
+	Coolify   TeamEnvs
+	Scalingo  Scalingo
+	Origine   Origine
+	DNS       Resolver
+	Certs     Certificats
+	Provision provision.API
+	Now       func() time.Time
 }
 
 // Rapport : écarts à corriger, et notes qui n'en sont pas. Cache dit que
@@ -51,6 +55,15 @@ type Rapport struct {
 
 func (r *Rapport) ecart(app, format string, a ...any) {
 	r.Ecarts = append(r.Ecarts, app+" : "+fmt.Sprintf(format, a...))
+}
+
+func (r *Rapport) ajout(app string, ecarts, notes []string) {
+	for _, e := range ecarts {
+		r.Ecarts = append(r.Ecarts, app+" : "+e)
+	}
+	for _, n := range notes {
+		r.Notes = append(r.Notes, app+" : "+n)
+	}
 }
 
 // loadInventory lit l'inventaire et garde la dernière version valide dans le

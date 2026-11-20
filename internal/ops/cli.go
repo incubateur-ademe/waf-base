@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"time"
 
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
@@ -25,13 +26,18 @@ host rattaché à l'app en host_header visitor.
 
 Audit : Activity Scalingo de chaque app depuis l'audit précédent (règles et
 domaines ajoutés ou retirés, SCALINGO_FORBIDDEN_PAGE_URL), puis, si l'app est
-verrouillée, 403 du firewall sur son origine. Ses écarts restent dans le pulse
-jusqu'à l'audit suivant.
+verrouillée, 403 du firewall sur son origine ; DNS de chaque host vers les VM
+de son stage (ou Cloudflare en edge) ; certificat servi par chaque VM à plus
+de 21 jours de l'échéance ; plan de provision vide sur chaque VM, si
+WAF_OPS_PROVISION est posée. Ses écarts restent dans le pulse jusqu'à l'audit
+suivant.
 
 Environnement : COOLIFY_URL, COOLIFY_TOKEN (read:sensitive, pour UPSTREAM_<APP>),
 WAF_OPS_STAGES (prod, preprod, ou les deux séparés par une virgule),
 WAF_OPS_FGP ({"url", "api": {"<région>": "<blob>"}}), WAF_OPS_FGP_KEY,
 WAF_OPS_PULSE_URL (boucle), WAF_OPS_INVENTAIRE (inventaire de main),
+WAF_OPS_PROVISION ({"project", "environment", "github_app", "base_ref", "vms":
+{"<vm>": {"server", "destination"}}}, facultative),
 WAF_OPS_ETC (/etc/waf), WAF_OPS_STATE (/var/lib/waf-ops).`
 
 var nowFunc = time.Now
@@ -78,7 +84,7 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 		}
 		return writeScopes(stdout, s)
 	}
-	d := Deps{Coolify: cl, Scalingo: NewFGPClient(cfg.FGP), Origine: Sonde{}, Now: nowFunc}
+	d := Deps{Coolify: cl, Scalingo: NewFGPClient(cfg.FGP), Origine: Sonde{}, DNS: net.DefaultResolver, Certs: TLSServi{}, Provision: cl, Now: nowFunc}
 	if mode == ModeControle {
 		var r Rapport
 		if cmd == "audit" {

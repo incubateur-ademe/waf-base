@@ -6,9 +6,11 @@ import (
 	"time"
 )
 
-// Audit est le passage horaire (section 3.5 du design), pour chaque app live
+// Audit est le passage horaire (section 3.5 du design). Pour chaque app live
 // et Scalingo des stages traités : Activity de l'app depuis le passage
-// précédent, puis, si l'app est verrouillée, sonde de son origine. curseurs
+// précédent, puis, si l'app est verrouillée, sonde de son origine. Pour chaque
+// app live des stages traités : DNS de ses hosts et certificat servi par
+// chaque VM de son stage. Enfin, plan de provision de chaque VM. curseurs
 // donne, par « région/app » Scalingo, la date du dernier événement lu ; Audit
 // rend les curseurs à garder, avancés pour les seules apps lues sans erreur.
 func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Time) (Rapport, map[string]time.Time, error) {
@@ -82,6 +84,31 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 		for _, n := range notes {
 			r.Notes = append(r.Notes, a.Name+" : "+n)
 		}
+	}
+	ips := map[string][]string{}
+	for _, v := range inv.VMs {
+		ips[v.Stage] = append(ips[v.Stage], v.IP)
+	}
+	for _, a := range inv.Apps {
+		if !cfg.Stages[a.Stage] || !a.Live {
+			continue
+		}
+		if d.DNS != nil {
+			ecarts, notes := ControleDNS(ctx, d.DNS, a, ips[a.Stage])
+			r.ajout(a.Name, ecarts, notes)
+		}
+		if d.Certs != nil {
+			ecarts, notes := ControleCertificats(ctx, d.Certs, a, ips[a.Stage], now)
+			r.ajout(a.Name, ecarts, notes)
+		}
+	}
+	switch {
+	case cfg.Provision == nil:
+		r.Notes = append(r.Notes, "WAF_OPS_PROVISION absente : plan de provision non contrôlé")
+	case d.Provision != nil:
+		ecarts, notes := ControlePlan(ctx, d.Provision, *cfg.Provision, cfg.CoolifyURL, cfg.CoolifyToken, inv, cfg.Stages)
+		r.Ecarts = append(r.Ecarts, ecarts...)
+		r.Notes = append(r.Notes, notes...)
 	}
 	// Une app dont UPSTREAM n'a pas été lue ce passage garde son curseur. Un
 	// curseur non revu pendant curseurMaxAge est celui d'une app sortie du
