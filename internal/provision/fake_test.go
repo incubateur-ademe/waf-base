@@ -17,8 +17,10 @@ import (
 // variable, chaîne vide convertie en null, réglages d'app rangés sous settings,
 // suppression de variable refusée (le jeton SecOps n'a pas l'ability delete).
 // Une variable d'équipe vide n'entre que par la vue développeur de l'UI : POST
-// /team/envs la refuse en HTTP 500 (colonne value NOT NULL). Un domaine déjà
-// porté par une autre app de l'équipe donne 409, sauf avec force_domain_override.
+// /team/envs la refuse en HTTP 500 (colonne value NOT NULL), et refuse en 422 un
+// champ hors de key, value, is_literal, is_multiline, is_shown_once et comment.
+// Un domaine déjà porté par une autre app de l'équipe donne 409, sauf avec
+// force_domain_override.
 type fakeCoolify struct {
 	t     *testing.T
 	token string
@@ -87,9 +89,12 @@ func newFake(t *testing.T, token string) (*fakeCoolify, *httptest.Server) {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() {
-		for _, w := range f.writes {
+		for i, w := range f.writes {
+			if w == "POST /api/v1/team/envs" && reEdgeTeamWrite.MatchString(f.bodies[i]) {
+				continue
+			}
 			if strings.HasPrefix(w, "POST /api/v1/team/envs") || strings.Contains(w, "/team/envs/") {
-				t.Errorf("écriture d'une variable d'équipe : %s", w)
+				t.Errorf("écriture d'une variable d'équipe hors de EDGE_SECRET_<APP> : %s", w)
 			}
 			if strings.HasPrefix(w, "POST /api/v1/servers/") || strings.Contains(w, "/envs/") && strings.Contains(w, "/servers/") {
 				t.Errorf("écriture d'une variable de serveur : %s", w)
@@ -141,6 +146,8 @@ func coolifyDefaults() map[string]any {
 		},
 	}
 }
+
+var teamEnvFields = map[string]bool{"key": true, "value": true, "is_literal": true, "is_multiline": true, "is_shown_once": true, "comment": true}
 
 var settingFields = map[string]bool{
 	"is_preview_deployments_enabled": true, "is_pr_deployments_public_enabled": true,
@@ -284,6 +291,9 @@ func envJSON(e *fakeEnv) map[string]any {
 	}
 }
 
+// Seule écriture de variable d'équipe admise : EDGE_SECRET_<APP> générée.
+var reEdgeTeamWrite = regexp.MustCompile(`^\{"comment":"[^"]*","key":"EDGE_SECRET_[A-Z0-9_]+","value":"[A-Za-z0-9_-]{43}"\}$`)
+
 var (
 	reApp     = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)$`)
 	reAppEnvs = regexp.MustCompile(`^/api/v1/applications/([A-Za-z0-9_-]+)/envs$`)
@@ -381,7 +391,7 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, out)
 	case r.Method == "POST" && p == "/api/v1/team/envs":
 		for k := range body {
-			if k != "key" && k != "value" {
+			if !teamEnvFields[k] {
 				write(w, 422, map[string]any{"message": "Validation failed.", "errors": map[string]any{k: "This field is not allowed."}})
 				return
 			}
@@ -396,8 +406,8 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(w, 500, map[string]any{"message": `SQLSTATE[23502]: Not null violation: null value in column "value" of relation "shared_environment_variables"`})
 			return
 		}
-		f.addShared(key, &s)
-		write(w, 201, map[string]any{"key": key})
+		sh := f.addShared(key, &s)
+		write(w, 201, map[string]any{"id": sh.ID})
 	case r.Method == "DELETE" && reAppEnv.MatchString(p):
 		write(w, 403, map[string]any{"message": "Missing required permissions: delete"})
 	case r.Method == "POST" && p == "/api/v1/applications/private-github-app":

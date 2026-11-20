@@ -45,6 +45,7 @@ type entry struct {
 	Hosts          []string   `yaml:"hosts"`
 	Canonical      *string    `yaml:"canonical"`
 	Edge           *string    `yaml:"edge"`
+	EdgeZones      []string   `yaml:"edge_zones"`
 	Stage          *string    `yaml:"stage"`
 	HostHeader     *string    `yaml:"host_header"`
 	CRSPlugins     *[]string  `yaml:"crs_plugins"`
@@ -114,6 +115,7 @@ type App struct {
 	Hosts          []string
 	Canonical      string
 	Edge           string
+	EdgeZones      []string
 	Stage          string
 	HostHeader     string
 	CRSPlugins     []string
@@ -173,6 +175,9 @@ func Load(b []byte, platforms map[string]bool) (Inventory, error) {
 	}
 	if f.Defaults.Stage != nil {
 		return Inventory{}, fmt.Errorf("inventaire : stage propre à une app, interdit dans defaults")
+	}
+	if f.Defaults.EdgeZones != nil {
+		return Inventory{}, fmt.Errorf("inventaire : edge_zones propre à une app, interdit dans defaults")
 	}
 	vms, err := parseVMs(f.VMs)
 	if err != nil {
@@ -299,6 +304,7 @@ func merge(name string, def, e entry) App {
 	if a.Hosts == nil {
 		a.Hosts = def.Hosts
 	}
+	a.EdgeZones = e.EdgeZones
 	var dr, er resources
 	if def.Resources != nil {
 		dr = *def.Resources
@@ -335,7 +341,61 @@ func validate(a App, platforms map[string]bool) ([]string, error) {
 	if a.Canonical != "" && !slices.Contains(hosts, a.Canonical) {
 		return nil, fmt.Errorf("canonical %q absent des hosts de l'app", a.Canonical)
 	}
+	if err := validateEdgeZones(a); err != nil {
+		return nil, err
+	}
 	return hosts, validateRest(a, platforms)
+}
+
+// validateEdgeZones refuse une zone sans host de l'app : la règle Cloudflare
+// n'y viserait rien. Une zone imbriquée dans une autre ne garde que les hosts
+// qu'elle porte, comme Cloudflare.
+func validateEdgeZones(a App) error {
+	if len(a.EdgeZones) == 0 {
+		return nil
+	}
+	if a.Edge == "" {
+		return fmt.Errorf("edge_zones sans edge : la règle Cloudflare n'est posée que pour une app en edge")
+	}
+	seen := map[string]bool{}
+	for _, z := range a.EdgeZones {
+		parsed, err := render.ParseHosts(z)
+		if err != nil || len(parsed) != 1 || parsed[0] != z {
+			return fmt.Errorf("edge_zones : zone %q invalide", z)
+		}
+		if seen[z] {
+			return fmt.Errorf("edge_zones : zone %s en double", z)
+		}
+		seen[z] = true
+	}
+	zh := a.ZoneHosts()
+	for _, z := range a.EdgeZones {
+		if len(zh[z]) == 0 {
+			return fmt.Errorf("edge_zones : zone %s sans host de l'app", z)
+		}
+	}
+	return nil
+}
+
+// ZoneHosts range chaque host de l'app dans la plus longue de ses edge_zones
+// qui le porte. Les hosts hors de toute zone n'y figurent pas.
+func (a App) ZoneHosts() map[string][]string {
+	out := map[string][]string{}
+	for _, h := range a.Hosts {
+		best := ""
+		for _, z := range a.EdgeZones {
+			if (h == z || strings.HasSuffix(h, "."+z)) && len(z) > len(best) {
+				best = z
+			}
+		}
+		if best != "" {
+			out[best] = append(out[best], h)
+		}
+	}
+	for z := range out {
+		sort.Strings(out[z])
+	}
+	return out
 }
 
 // validateHosts lit chaque host seul : ParseHosts sur la liste jointe accepte

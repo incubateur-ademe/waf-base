@@ -4,17 +4,22 @@ package provision
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/incubateur-ademe/waf-base/internal/cloudflare"
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
+	"github.com/incubateur-ademe/waf-base/internal/render"
 )
 
 type API interface {
@@ -29,6 +34,7 @@ type API interface {
 	UpsertApplicationEnvs(ctx context.Context, uuid string, envs []coolify.EnvWrite) error
 	ListTeamEnvs(ctx context.Context) ([]coolify.SharedEnv, error)
 	ListServerEnvs(ctx context.Context, uuid string) ([]coolify.SharedEnv, error)
+	CreateTeamEnv(ctx context.Context, e coolify.SharedEnvWrite) error
 }
 
 // Réseau Docker de la destination par défaut d'un serveur Coolify : un WAF qui
@@ -175,7 +181,7 @@ func wantEnvs(app inventory.App, cfg Config) []envWant {
 	}
 	edgeSecret := envWant{key: "WAF_EDGE_SECRET", omitEmpty: true}
 	if app.Edge != "" {
-		edgeSecret.shared, edgeSecret.required, edgeSecret.gates = "EDGE_SECRET_"+sfx, true, "WAF_EDGE"
+		edgeSecret.shared, edgeSecret.required, edgeSecret.gates = cloudflare.SecretKey(app), true, "WAF_EDGE"
 	}
 	out = append(out, edgeSecret, envWant{key: "WAF_EDGE", value: app.Edge, omitEmpty: true})
 	for i := range out {
@@ -213,12 +219,37 @@ type AppPlan struct {
 	Create    bool
 	Fields    []Change
 	Envs      []EnvChange
+	// GenSecret : EDGE_SECRET_<APP> absente, créée avant les variables de l'app,
+	// avec la valeur littérale de WAF_EDGE_SECRET si elle est valide (Adopt),
+	// sinon tirée au hasard.
+	GenSecret bool
+	Adopt     bool
+	Rules     []RulePlan
 	Notes     []string
 	patch     map[string]any
+	secret    string
+	literal   string
 }
 
+// RulePlan est la règle waf-edge-<app> à poser dans une zone Cloudflare.
+type RulePlan struct {
+	Zone, Ref, Expression string
+	// Create : règle absente ; NewSet : la zone n'a pas encore de ruleset pour la phase.
+	Create, NewSet bool
+	Ecarts         []string
+	zoneID         string
+	rulesetID      string
+	ruleID         string
+	want           cloudflare.Want
+}
+
+// Changed dit si l'app Coolify change.
 func (a *AppPlan) Changed() bool {
 	return a.Create || len(a.Fields) > 0 || len(a.Envs) > 0
+}
+
+func (a *AppPlan) pending() bool {
+	return a.Changed() || a.GenSecret || len(a.Rules) > 0
 }
 
 type Plan struct {
@@ -237,7 +268,10 @@ func (p *Plan) Changes() int {
 		} else {
 			n += len(a.Fields)
 		}
-		n += len(a.Envs)
+		n += len(a.Envs) + len(a.Rules)
+		if a.GenSecret {
+			n++
+		}
 	}
 	return n
 }
@@ -511,18 +545,113 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 			}
 		}
 	}
+	secrets := map[string]cloudflare.Secret{}
+	gen := map[string]bool{}
+	for _, app := range apps {
+		if app.Edge != render.EdgeCloudflare {
+			continue
+		}
+		secrets[app.Name] = cloudflare.EdgeSecret(vars.team, app)
+		if k := cloudflare.SecretKey(app); secrets[app.Name].Defaut == cloudflare.SecretAbsente {
+			// La variable sera créée avant les variables de l'app : le plan les pose
+			// comme si elle était déjà remplie. Cette valeur ne sort jamais.
+			gen[app.Name] = true
+			vars.team[k] = coolify.SharedEnv{Key: k, Value: coolify.Str{Set: true, Value: "(générée par --apply)"}}
+		}
+	}
 	list, err := api.ListApplications(ctx)
 	if err != nil {
 		return nil, err
 	}
+	zones := map[string]cloudflare.ZoneState{}
 	for _, app := range apps {
 		ap, err := computeApp(ctx, api, cfg, app, list, vars, p.githubAppID)
 		if err != nil {
 			return nil, fmt.Errorf("%s : %w", ResourceName(app, cfg.VM), err)
 		}
+		if err := planEdge(ctx, cfg.Cloudflare, p, &ap, secrets[app.Name], gen[app.Name], zones); err != nil {
+			return nil, fmt.Errorf("%s : %w", ResourceName(app, cfg.VM), err)
+		}
 		p.Apps = append(p.Apps, ap)
 	}
 	return p, nil
+}
+
+const noCloudflare = "règles Cloudflare non vérifiées : " + cloudflare.TokenEnv + " absent"
+
+// planEdge prévoit le secret et les règles d'une app en edge cloudflare. La
+// règle n'est posée que pour une telle app : une autre n'a pas de secret à
+// recevoir. Elle s'ajoute ou se modifie seule, sans réécrire la phase.
+func planEdge(ctx context.Context, cf cloudflare.API, p *Plan, ap *AppPlan, s cloudflare.Secret, gen bool, zones map[string]cloudflare.ZoneState) error {
+	app := ap.App
+	if app.Edge != render.EdgeCloudflare {
+		return nil
+	}
+	key := cloudflare.SecretKey(app)
+	ap.GenSecret = gen
+	switch {
+	case s.Defaut == "":
+		ap.secret = s.Value
+	case gen && ap.literal != "":
+		// Le WAF en service et une règle posée à la main portent déjà cette
+		// valeur : une valeur neuve les désapparierait.
+		ap.Adopt, ap.secret = true, ap.literal
+	}
+	switch {
+	case len(app.EdgeZones) == 0:
+		ap.Notes = append(ap.Notes, fmt.Sprintf("règle Cloudflare hors de provision, edge_zones absent de l'inventaire : la poser à la main avec la valeur de %s", key))
+		return nil
+	case !gen && s.Defaut != "":
+		ap.Notes = append(ap.Notes, fmt.Sprintf("%s %s : règles Cloudflare non posées", key, s.Defaut))
+		if s.Defaut == cloudflare.SecretHorsFormat {
+			ap.Notes = append(ap.Notes, fmt.Sprintf("action ops : remplacer %s, wafgen run refuse de démarrer avec WAF_EDGE=cloudflare et ce secret", key))
+		}
+		return nil
+	case cf == nil:
+		if !slices.Contains(p.Notes, noCloudflare) {
+			p.Notes = append(p.Notes, noCloudflare)
+		}
+		return nil
+	}
+	for _, w := range cloudflare.Wants(app, ap.secret) {
+		st, ok := zones[w.Zone]
+		if !ok {
+			var err error
+			if st, err = cloudflare.ReadZone(ctx, cf, w.Zone); err != nil {
+				return fmt.Errorf("zone Cloudflare %s : %w", w.Zone, err)
+			}
+			zones[w.Zone] = st
+			for _, id := range st.Foreign() {
+				p.Notes = append(p.Notes, fmt.Sprintf("action ops : retirer de la zone %s la règle %s, qui touche %s hors de provision", w.Zone, id, cloudflare.Header))
+			}
+		}
+		cur, err := st.Managed(w.Ref())
+		if err != nil {
+			return err
+		}
+		expr, err := w.Expression()
+		if err != nil {
+			return err
+		}
+		rp := RulePlan{Zone: w.Zone, Ref: w.Ref(), Expression: expr, zoneID: st.Zone.ID, want: w}
+		if st.Ruleset != nil {
+			rp.rulesetID = st.Ruleset.ID
+		}
+		if cur == nil {
+			rp.Create, rp.NewSet = true, st.Ruleset == nil
+		} else {
+			rp.ruleID = cur.ID
+			rp.Ecarts = cloudflare.Diff(*cur, w, !gen || ap.Adopt)
+			if gen && !ap.Adopt {
+				rp.Ecarts = append(rp.Ecarts, "valeur de "+cloudflare.Header+" remplacée par le secret généré")
+			}
+			if len(rp.Ecarts) == 0 {
+				continue
+			}
+		}
+		ap.Rules = append(ap.Rules, rp)
+	}
+	return nil
 }
 
 // orphan dit si la valeur renvoie à une variable d'équipe absente : Coolify
@@ -588,6 +717,9 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 				return ap, fmt.Errorf("variable %s en double", e.Key)
 			}
 			current[e.Key] = e
+		}
+		if v := envValue(current["WAF_EDGE_SECRET"]); cloudflare.ValidSecret(v) {
+			ap.literal = v
 		}
 	}
 
@@ -790,55 +922,126 @@ func withGithubApp(patch map[string]any, cfg Config) map[string]any {
 	return patch
 }
 
-// Apply écrit le plan : création ou mise à jour des apps, puis leurs variables.
-// Il n'écrit aucune variable partagée et ne déclenche aucun déploiement.
+// newSecret tire 32 octets, 43 caractères dans [A-Za-z0-9_-] que wafgen run accepte.
+func newSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	s := base64.RawURLEncoding.EncodeToString(b)
+	if !cloudflare.ValidSecret(s) {
+		return "", fmt.Errorf("secret généré hors format")
+	}
+	return s, nil
+}
+
+// Apply écrit le plan, app par app : EDGE_SECRET_<APP> si elle manque, seule
+// variable partagée que provision crée ; l'app et ses variables ; puis ses
+// règles Cloudflare. Il ne déclenche aucun déploiement.
 func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
+	created := map[string]string{}
 	for i := range p.Apps {
 		ap := &p.Apps[i]
-		if !ap.Changed() {
-			continue
-		}
-		if ap.Create {
-			// Coolify contrôle les domaines avant toute écriture : le second essai
-			// ne double rien.
-			body := createBody(ap, cfg)
-			uuid, err := api.CreateApplication(ctx, body)
-			if err != nil && ap.onlyTwins(err) {
-				body["force_domain_override"] = true
-				uuid, err = api.CreateApplication(ctx, body)
+		if ap.GenSecret {
+			s, err := ap.secret, error(nil)
+			if !ap.Adopt {
+				s, err = newSecret()
 			}
-			if err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
-			}
-			ap.UUID = uuid
-			if err := checkAppDestination(ctx, api, uuid, cfg); err != nil {
-				return fmt.Errorf("%s créée, mais %w ; rien d'autre n'est écrit sur cette app", ap.Name, err)
-			}
-			cur, err := api.GetApplication(ctx, uuid)
 			if err != nil {
 				return fmt.Errorf("%s : %w", ap.Name, err)
 			}
-			_, ap.patch = fieldChanges(cur, ap.App, p.githubAppID)
-		}
-		if len(ap.patch) > 0 {
-			patch := withGithubApp(ap.patch, cfg)
-			err := api.UpdateApplication(ctx, ap.UUID, patch)
-			if _, dom := patch["domains"]; err != nil && dom && ap.onlyTwins(err) {
-				patch["force_domain_override"] = true
-				err = api.UpdateApplication(ctx, ap.UUID, patch)
-			}
+			key := cloudflare.SecretKey(ap.App)
+			err = api.CreateTeamEnv(ctx, coolify.SharedEnvWrite{Key: key, Value: s,
+				Comment: "Secret d'edge du WAF de " + ap.App.Name + " (IDR-0039), généré par wafgen provision"})
 			if err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
+				return fmt.Errorf("%s : création de %s : %w", ap.Name, key, err)
+			}
+			ap.secret = s
+		}
+		if ap.Changed() {
+			if err := applyApp(ctx, api, cfg, p, ap); err != nil {
+				return err
 			}
 		}
-		var ws []coolify.EnvWrite
-		for _, e := range ap.Envs {
-			ws = append(ws, e.Write)
-		}
-		if len(ws) > 0 {
-			if err := api.UpsertApplicationEnvs(ctx, ap.UUID, ws); err != nil {
-				return fmt.Errorf("%s : %w", ap.Name, err)
+		for _, r := range ap.Rules {
+			if err := applyRule(ctx, cfg.Cloudflare, ap, r, created); err != nil {
+				return fmt.Errorf("%s : règle Cloudflare %s, zone %s : %w", ap.Name, r.Ref, r.Zone, err)
 			}
+		}
+	}
+	return nil
+}
+
+// applyRule pose une règle. created garde le ruleset créé plus tôt dans ce
+// passage pour une zone partagée par deux apps.
+func applyRule(ctx context.Context, cf cloudflare.API, ap *AppPlan, r RulePlan, created map[string]string) error {
+	if cf == nil {
+		return fmt.Errorf("%s absent", cloudflare.TokenEnv)
+	}
+	w := r.want
+	w.Secret = ap.secret
+	rulesetID := r.rulesetID
+	if rulesetID == "" {
+		rulesetID = created[r.zoneID]
+	}
+	var rs *cloudflare.Ruleset
+	var err error
+	switch {
+	case r.ruleID != "":
+		rs, err = cf.UpdateRule(ctx, r.zoneID, rulesetID, r.ruleID, w)
+	case rulesetID != "":
+		rs, err = cf.AddRule(ctx, r.zoneID, rulesetID, w)
+	default:
+		rs, err = cf.CreateEntrypoint(ctx, r.zoneID, w)
+	}
+	if err != nil {
+		return err
+	}
+	created[r.zoneID] = rs.ID
+	return nil
+}
+
+func applyApp(ctx context.Context, api API, cfg Config, p *Plan, ap *AppPlan) error {
+	if ap.Create {
+		// Coolify contrôle les domaines avant toute écriture : le second essai
+		// ne double rien.
+		body := createBody(ap, cfg)
+		uuid, err := api.CreateApplication(ctx, body)
+		if err != nil && ap.onlyTwins(err) {
+			body["force_domain_override"] = true
+			uuid, err = api.CreateApplication(ctx, body)
+		}
+		if err != nil {
+			return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
+		}
+		ap.UUID = uuid
+		if err := checkAppDestination(ctx, api, uuid, cfg); err != nil {
+			return fmt.Errorf("%s créée, mais %w ; rien d'autre n'est écrit sur cette app", ap.Name, err)
+		}
+		cur, err := api.GetApplication(ctx, uuid)
+		if err != nil {
+			return fmt.Errorf("%s : %w", ap.Name, err)
+		}
+		_, ap.patch = fieldChanges(cur, ap.App, p.githubAppID)
+	}
+	if len(ap.patch) > 0 {
+		patch := withGithubApp(ap.patch, cfg)
+		err := api.UpdateApplication(ctx, ap.UUID, patch)
+		if _, dom := patch["domains"]; err != nil && dom && ap.onlyTwins(err) {
+			patch["force_domain_override"] = true
+			err = api.UpdateApplication(ctx, ap.UUID, patch)
+		}
+		if err != nil {
+			return fmt.Errorf("%s : %w", ap.Name, conflictErr(err))
+		}
+	}
+	var ws []coolify.EnvWrite
+	for _, e := range ap.Envs {
+		ws = append(ws, e.Write)
+	}
+	if len(ws) > 0 {
+		if err := api.UpsertApplicationEnvs(ctx, ap.UUID, ws); err != nil {
+			return fmt.Errorf("%s : %w", ap.Name, err)
 		}
 	}
 	return nil
@@ -858,7 +1061,7 @@ func Print(w io.Writer, p *Plan) {
 			for _, c := range a.Fields {
 				fmt.Fprintf(w, "  %s = %s\n", c.Key, c.New)
 			}
-		case a.Changed():
+		case a.pending():
 			fmt.Fprintf(w, "\n%s (%s) : mise à jour\n", a.Name, a.UUID)
 			for _, c := range a.Fields {
 				fmt.Fprintf(w, "  ~ %s : %s -> %s\n", c.Key, c.Old, c.New)
@@ -873,13 +1076,30 @@ func Print(w io.Writer, p *Plan) {
 				fmt.Fprintf(w, "  ~ env %s : %s -> %s\n", e.Key, e.Old, e.New)
 			}
 		}
+		key := cloudflare.SecretKey(a.App)
+		switch {
+		case a.Adopt:
+			fmt.Fprintf(w, "  + variable d'équipe %s = (valeur littérale de WAF_EDGE_SECRET reprise, masquée)\n", key)
+		case a.GenSecret:
+			fmt.Fprintf(w, "  + variable d'équipe %s = (générée, valeur masquée)\n", key)
+		}
+		for _, r := range a.Rules {
+			switch {
+			case r.Create && r.NewSet:
+				fmt.Fprintf(w, "  + règle Cloudflare %s, zone %s, dans un ruleset %s à créer : %s, %s = %s\n", r.Ref, r.Zone, cloudflare.Phase, r.Expression, cloudflare.Header, key)
+			case r.Create:
+				fmt.Fprintf(w, "  + règle Cloudflare %s, zone %s : %s, %s = %s\n", r.Ref, r.Zone, r.Expression, cloudflare.Header, key)
+			default:
+				fmt.Fprintf(w, "  ~ règle Cloudflare %s, zone %s : %s\n", r.Ref, r.Zone, strings.Join(r.Ecarts, " ; "))
+			}
+		}
 		for _, n := range a.Notes {
 			fmt.Fprintf(w, "  ! %s\n", n)
 		}
 		switch {
 		case a.Create:
 			fmt.Fprintf(w, "  ! premier déploiement à lancer depuis Coolify une fois les actions ops faites : provision ne déploie pas\n")
-		case a.Changed():
+		case a.Changed() || a.GenSecret:
 			fmt.Fprintf(w, "  ! redéploiement nécessaire après --apply : provision ne déploie pas\n")
 		}
 	}
