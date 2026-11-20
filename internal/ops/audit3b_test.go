@@ -88,7 +88,7 @@ type pki struct {
 func newPKI(t *testing.T) pki {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ca de test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(10 * 365 * 24 * time.Hour),
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ca de test"}, NotBefore: time.Now().Add(-5 * 365 * 24 * time.Hour), NotAfter: time.Now().Add(10 * 365 * 24 * time.Hour),
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
 	if err != nil {
@@ -102,8 +102,17 @@ func newPKI(t *testing.T) pki {
 
 func (p pki) leaf(t *testing.T, host string, notAfter time.Time) tls.Certificate {
 	t.Helper()
+	return p.leafNoms(t, notAfter, host)
+}
+
+func (p pki) leafNoms(t *testing.T, notAfter time.Time, hosts ...string) tls.Certificate {
+	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), DNSNames: []string{host}, NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter,
+	notBefore := time.Now().Add(-time.Hour)
+	if notAfter.Before(notBefore) {
+		notBefore = notAfter.Add(-90 * 24 * time.Hour)
+	}
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), DNSNames: hosts, NotBefore: notBefore, NotAfter: notAfter,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, p.ca, &key.PublicKey, p.key)
 	if err != nil {

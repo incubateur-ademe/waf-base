@@ -218,9 +218,24 @@ func TestAudit(t *testing.T) {
 
 const pageRefus = `<!DOCTYPE html><html><head><title>Access denied - Scalingo</title></head><body>403</body></html>`
 
+var sondeNoms = []string{"waf-pilote.osc-fr1.scalingo.io", "autre.osc-fr1.scalingo.io", "waf-pilote.incubateur.ademe.dev"}
+
 func sondeServer(t *testing.T, h http.HandlerFunc) (Sonde, *[]string) {
 	t.Helper()
-	srv := httptest.NewTLSServer(h)
+	p := newPKI(t)
+	return sondeServerCerts(t, h, p, func(*tls.ClientHelloInfo) tls.Certificate {
+		return p.leafNoms(t, time.Now().Add(60*24*time.Hour), sondeNoms...)
+	})
+}
+
+func sondeServerCerts(t *testing.T, h http.HandlerFunc, p pki, cert func(*tls.ClientHelloInfo) tls.Certificate) (Sonde, *[]string) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.TLS = &tls.Config{GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		c := cert(hi)
+		return &c, nil
+	}}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	var dials []string
 	return Sonde{
@@ -234,7 +249,7 @@ func sondeServer(t *testing.T, h http.HandlerFunc) (Sonde, *[]string) {
 			dials = append(dials, addr)
 			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
 		},
-		TLS: &tls.Config{InsecureSkipVerify: true},
+		TLS: &tls.Config{RootCAs: p.roots},
 	}, &dials
 }
 
@@ -301,13 +316,13 @@ func TestSonde(t *testing.T) {
 	if c := (Sonde{}).client(""); c.Transport.(*http.Transport).TLSClientConfig != nil {
 		t.Fatal("la sonde de production ne vérifie pas le certificat")
 	}
-	if c := (Sonde{}).client("192.0.2.10"); !c.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("sonde à l'IP du routeur dépendante du certificat Scalingo")
+	if c := (Sonde{}).client("192.0.2.10"); c.Transport.(*http.Transport).TLSClientConfig.VerifyConnection == nil {
+		t.Fatal("sonde à l'IP du routeur sans vérification de la chaîne")
 	}
 	s.TLS = nil
 	ecarts, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
-	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "certificat refusé") || !strings.Contains(ecarts[1], "certificat refusé") {
-		t.Fatalf("certificat de test accepté sans réglage, ou refusé à l'IP du routeur : %v", ecarts)
+	if len(ecarts) != 3 || !strings.Contains(ecarts[0], "certificat refusé") || !strings.Contains(ecarts[2], "certificat refusé") {
+		t.Fatalf("autorité de test acceptée sans réglage : %v", ecarts)
 	}
 }
 
@@ -614,5 +629,36 @@ func TestAuditInventairePerime(t *testing.T) {
 	r, _, err := Audit(context.Background(), cfg, d, nil)
 	if err != nil || len(r.Ecarts) != 0 || !strings.Contains(strings.Join(r.Notes, "\n"), "inventaire non rafraîchi depuis 24 h") {
 		t.Fatalf("écart d'inventaire doublé par l'audit : %v %v", r.Ecarts, err)
+	}
+}
+
+func TestSondeRouteurCertificat(t *testing.T) {
+	refus := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(403)
+		fmt.Fprint(w, pageRefus)
+	}
+	p, tiers := newPKI(t), newPKI(t)
+	valide := p.leafNoms(t, time.Now().Add(60*24*time.Hour), sondeNoms...)
+	cases := []struct {
+		nom    string
+		host   tls.Certificate
+		ecarts int
+	}{
+		{"expiré, échéance ignorée", p.leafNoms(t, time.Now().Add(-24*time.Hour), "waf-pilote.incubateur.ademe.dev"), 0},
+		{"autorité inconnue", tiers.leafNoms(t, time.Now().Add(60*24*time.Hour), "waf-pilote.incubateur.ademe.dev"), 1},
+		{"autre nom", p.leafNoms(t, time.Now().Add(60*24*time.Hour), "ailleurs.example.org"), 1},
+	}
+	for _, c := range cases {
+		s, _ := sondeServerCerts(t, refus, p, func(hi *tls.ClientHelloInfo) tls.Certificate {
+			if hi.ServerName == "waf-pilote.incubateur.ademe.dev" {
+				return c.host
+			}
+			return valide
+		})
+		ecarts, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+		if len(ecarts) != c.ecarts || (c.ecarts == 1 && !strings.Contains(ecarts[0], "envoyé au routeur 192.0.2.10 : sans réponse : certificat refusé")) {
+			t.Fatalf("%s : %v", c.nom, ecarts)
+		}
 	}
 }

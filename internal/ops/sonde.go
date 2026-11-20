@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -60,12 +61,14 @@ func (s Sonde) client(routeur string) *http.Client {
 	if routeur != "" {
 		// À l'IP du routeur, le certificat est celui que Scalingo garde pour le
 		// host, poussé à la main ou par waf-ops : son échéance n'est pas l'objet
-		// de la sonde. Rien de sensible n'est envoyé, seule la signature du 403
-		// compte.
+		// de la sonde. La chaîne et le nom restent vérifiés, pour qu'un tiers sur
+		// le chemin ne puisse pas servir un faux 403.
 		if tc == nil {
 			tc = &tls.Config{}
 		}
+		roots := tc.RootCAs
 		tc.InsecureSkipVerify = true
+		tc.VerifyConnection = func(cs tls.ConnectionState) error { return sansEcheance(cs, roots) }
 	}
 	return &http.Client{
 		Timeout: sondeTimeout,
@@ -77,6 +80,24 @@ func (s Sonde) client(routeur string) *http.Client {
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+// sansEcheance vérifie la chaîne et le nom du certificat à une date prise au
+// milieu de sa période de validité : seule son échéance est ignorée.
+func sansEcheance(cs tls.ConnectionState, roots *x509.CertPool) error {
+	if len(cs.PeerCertificates) == 0 {
+		return errors.New("aucun certificat présenté")
+	}
+	leaf := cs.PeerCertificates[0]
+	inter := x509.NewCertPool()
+	for _, c := range cs.PeerCertificates[1:] {
+		inter.AddCert(c)
+	}
+	milieu := leaf.NotBefore.Add(leaf.NotAfter.Sub(leaf.NotBefore) / 2)
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Roots: roots, Intermediates: inter, CurrentTime: milieu}); err != nil {
+		return &tls.CertificateVerificationError{UnverifiedCertificates: cs.PeerCertificates, Err: err}
+	}
+	return nil
 }
 
 func (s Sonde) resolve(ctx context.Context, host string) ([]string, error) {
