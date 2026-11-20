@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -44,7 +43,11 @@ type Sonde struct {
 }
 
 // client : routeur et origine ne servent qu'à l'appel du host à l'IP du
-// routeur, où le certificat de l'origine est admis aussi.
+// routeur. Le routeur Scalingo choisit l'app par l'en-tête Host, pas par le
+// SNI (relevé du 2026-11-20 : un Host inconnu rend 404 avec le SNI d'une app
+// existante). Le SNI est donc l'origine <app>.<région>.scalingo.io, dont
+// Scalingo tient le certificat, vérifié comme ailleurs ; le Host reste celui
+// du visiteur.
 func (s Sonde) client(routeur, origine string) *http.Client {
 	d := s.Dial
 	if d == nil {
@@ -61,16 +64,10 @@ func (s Sonde) client(routeur, origine string) *http.Client {
 		tc = s.TLS.Clone()
 	}
 	if routeur != "" {
-		// À l'IP du routeur, le certificat est celui que Scalingo garde pour le
-		// host, poussé à la main ou par waf-ops : son échéance n'est pas l'objet
-		// de la sonde. La chaîne et le nom restent vérifiés, pour qu'un tiers sur
-		// le chemin ne puisse pas servir un faux 403.
 		if tc == nil {
 			tc = &tls.Config{}
 		}
-		roots := tc.RootCAs
-		tc.InsecureSkipVerify = true
-		tc.VerifyConnection = func(cs tls.ConnectionState) error { return sansEcheance(cs, roots, origine) }
+		tc.ServerName = origine
 	}
 	return &http.Client{
 		Timeout: sondeTimeout,
@@ -82,36 +79,6 @@ func (s Sonde) client(routeur, origine string) *http.Client {
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-}
-
-// sansEcheance vérifie la chaîne et le nom du certificat à une date prise au
-// milieu de sa période de validité : seule son échéance est ignorée. Le nom
-// admis est le host, ou l'origine <app>.<région>.scalingo.io : sans certificat
-// pour le host, le routeur présente celui de l'origine, qu'un tiers ne peut pas
-// présenter non plus. Un host en IP littérale n'a pas de nom vérifiable.
-func sansEcheance(cs tls.ConnectionState, roots *x509.CertPool, origine string) error {
-	if len(cs.PeerCertificates) == 0 {
-		return errors.New("aucun certificat présenté")
-	}
-	if cs.ServerName == "" {
-		return &tls.CertificateVerificationError{UnverifiedCertificates: cs.PeerCertificates, Err: errors.New("host sans nom vérifiable")}
-	}
-	leaf := cs.PeerCertificates[0]
-	inter := x509.NewCertPool()
-	for _, c := range cs.PeerCertificates[1:] {
-		inter.AddCert(c)
-	}
-	milieu := leaf.NotBefore.Add(leaf.NotAfter.Sub(leaf.NotBefore) / 2)
-	_, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Roots: roots, Intermediates: inter, CurrentTime: milieu})
-	if err != nil && origine != "" {
-		if _, e2 := leaf.Verify(x509.VerifyOptions{DNSName: origine, Roots: roots, Intermediates: inter, CurrentTime: milieu}); e2 == nil {
-			return nil
-		}
-	}
-	if err != nil {
-		return &tls.CertificateVerificationError{UnverifiedCertificates: cs.PeerCertificates, Err: err}
-	}
-	return nil
 }
 
 func (s Sonde) resolve(ctx context.Context, host string) ([]string, error) {
