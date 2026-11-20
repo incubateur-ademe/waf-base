@@ -7,6 +7,7 @@ require (
 	github.com/corazawaf/coraza-caddy/v2 v2.6.2
 	github.com/corazawaf/coraza/v3 v3.8.2-0.20261017201958-12c67370b3b3
 	github.com/mholt/caddy-ratelimit v0.1.1-0.20260612195517-5625512f24f6
+	golang.org/x/crypto v0.59.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -171,7 +172,6 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20261030153154-30a33513ff6d // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
 	golang.org/x/net v0.62.0 // indirect
