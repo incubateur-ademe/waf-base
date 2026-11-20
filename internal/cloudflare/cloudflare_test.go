@@ -418,3 +418,17 @@ func TestIdentifiantHorsFormeJamaisEnvoye(t *testing.T) {
 		t.Fatalf("%d requêtes envoyées", hits)
 	}
 }
+
+func TestRegleIllisibleSignalee(t *testing.T) {
+	st := cloudflare.ZoneState{Zone: cloudflare.Zone{Name: "z.fr"}, Ruleset: &cloudflare.Ruleset{Rules: []cloudflare.Rule{
+		{ID: zid, Ref: "manuelle", ActionParameters: []byte(`"illisible"`)},
+		{ID: rsid, Ref: "sans-parametres"},
+	}}}
+	if got := st.Foreign(); len(got) != 1 || got[0] != zid {
+		t.Fatalf("règles étrangères : %v", got)
+	}
+	d := cloudflare.Diff(cloudflare.Rule{Action: "rewrite", Enabled: true, Expression: expr, ActionParameters: []byte(`{"headers":[1]}`)}, want(), true)
+	if strings.Join(d, " ; ") != "paramètres d'action illisibles" {
+		t.Fatalf("écarts : %v", d)
+	}
+}
