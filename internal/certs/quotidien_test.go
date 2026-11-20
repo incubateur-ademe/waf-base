@@ -183,6 +183,42 @@ func TestQuotidienPlusRecentSurScalingo(t *testing.T) {
 	if !contient(notes, "après celui d'acme.json, pas de poussée") {
 		t.Errorf("notes %q", notes)
 	}
+	// Plus récent mais sous 21 jours : écart, toujours sans poussée.
+	court := lePKI(t).feuille(t, optsFeuille{cn: hostPilote, notAfter: maintenant.Add(10 * 24 * time.Hour)})
+	s.cop.contenu["preprod"] = acmeJSON(t, "letsencrypt", entree{cert: court.chaine, key: court.cle})
+	s.lec.doms["osc-fr1/waf-pilote"][0].Validity = Validite{maintenant.Add(15 * 24 * time.Hour)}
+	ecarts, _ = s.lancer(t, appPilot)
+	if !contient(ecarts, "certificat de "+hostPilote+" sur waf-pilote (osc-fr1) expire le 2026-12-05") || len(s.f.liste()) != 0 {
+		t.Errorf("écarts %q, %d appel(s)", ecarts, len(s.f.liste()))
+	}
+}
+
+const ecartScalingo5j = "waf-pilote : certificat de " + hostPilote + " sur waf-pilote (osc-fr1) expire le 2026-11-25"
+
+func scalingoA5Jours(s *scenario) {
+	s.lec.doms["osc-fr1/waf-pilote"][0].Validity = Validite{maintenant.Add(5 * 24 * time.Hour)}
+}
+
+// acme.json lu, mais sans certificat utilisable : un écart, pas une note de
+// copie manquante.
+func TestQuotidienAcmeSansCertificat(t *testing.T) {
+	for nom, raw := range map[string][]byte{
+		"null":   []byte(`{"letsencrypt": {"Account": {}, "Certificates": null}}`),
+		"base64": acmeJSON(t, "letsencrypt", entree{main: hostPilote, certB64: "%%%", keyB64: "%%%"}),
+	} {
+		t.Run(nom, func(t *testing.T) {
+			s := nouveauScenario(t)
+			s.cop.contenu["preprod"] = raw
+			s.lec.doms["osc-fr1/waf-pilote"][0].SSL = false
+			ecarts, notes := s.lancer(t, appPilot)
+			if !contient(ecarts, "waf-pilote : aucun certificat pour "+hostPilote+" dans acme.json du stage preprod") {
+				t.Errorf("écarts %q", ecarts)
+			}
+			if contient(notes, "pas de copie") {
+				t.Errorf("notes %q", notes)
+			}
+		})
+	}
 }
 
 func TestQuotidienStages(t *testing.T) {
@@ -213,8 +249,9 @@ func jsonChaine(b []byte) string {
 func TestQuotidienCopieEchouee(t *testing.T) {
 	s := nouveauScenario(t)
 	s.cop.err["preprod"] = ErrNonForcee
+	scalingoA5Jours(s)
 	ecarts, notes := s.lancer(t, appPilot)
-	if !contient(ecarts, "vm preprod : acme.json non copié : clé sans commande forcée") {
+	if !contient(ecarts, "vm preprod : acme.json non copié : clé sans commande forcée") || !contient(ecarts, ecartScalingo5j) {
 		t.Errorf("écarts %q", ecarts)
 	}
 	if !contient(notes, "pas de copie d'acme.json de preprod ce jour, poussée sautée") {
@@ -244,8 +281,9 @@ func TestQuotidienChaineRefusee(t *testing.T) {
 	s := nouveauScenario(t)
 	e := nouvellePKI(t, "Staging").feuille(t, optsFeuille{cn: hostPilote})
 	s.cop.contenu["preprod"] = acmeJSON(t, "letsencrypt", entree{cert: e.chaine, key: e.cle})
+	scalingoA5Jours(s)
 	ecarts, _ := s.lancer(t, appPilot)
-	if !contient(ecarts, "aucun certificat valide pour "+hostPilote+" (le plus récent : autorité inconnue) dans acme.json du stage preprod") {
+	if !contient(ecarts, ecartScalingo5j) || !contient(ecarts, "aucun certificat valide pour "+hostPilote+" (le plus récent : autorité inconnue) dans acme.json du stage preprod") {
 		t.Errorf("écarts %q", ecarts)
 	}
 	if len(s.f.liste()) != 0 {
@@ -261,8 +299,9 @@ func TestQuotidienRefusEtReponse(t *testing.T) {
 		_, _ = w.Write(a.Body)
 		return true
 	}
+	scalingoA5Jours(s)
 	ecarts, notes := s.lancer(t, appPilot)
-	if !contient(ecarts, "waf-pilote : certificat de "+hostPilote+" non poussé sur waf-pilote (osc-fr1) : FGP refuse PATCH") {
+	if !contient(ecarts, ecartScalingo5j) || !contient(ecarts, "waf-pilote : certificat de "+hostPilote+" non poussé sur waf-pilote (osc-fr1) : FGP refuse PATCH") {
 		t.Errorf("écarts %q", ecarts)
 	}
 	if !contient(notes, "détail") {

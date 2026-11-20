@@ -190,7 +190,9 @@ func pousserApp(ctx context.Context, cfg Config, lec Lecteur, ec ecrivain, now t
 	}
 	for _, dm := range rel {
 		host := normHost(dm.Name)
-		if len(certs) == 0 {
+		// Une copie lue mais sans certificat utilisable n'est pas une copie
+		// manquante : elle passe par choisir, qui en fait un écart.
+		if len(certs) == 0 && len(manquantes) > 0 {
 			p.note(a.Name, "%s : pas de copie d'acme.json de %s ce jour, poussée sautée", host, strings.Join(manquantes, ", "))
 			expirationScalingo(p, a.Name, host, where, dm, now)
 			continue
