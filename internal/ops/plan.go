@@ -15,6 +15,16 @@ import (
 
 var computePlan = provision.Compute
 
+// planProbleme : une erreur Coolify perd le corps de sa réponse, qui peut
+// reprendre une valeur.
+func planProbleme(err error) string {
+	var he *coolify.HTTPError
+	if errors.As(err, &he) {
+		return fmt.Sprintf("Coolify %s %s : HTTP %d", he.Method, he.Path, he.Status)
+	}
+	return err.Error()
+}
+
 var errLectureSeule = errors.New("écriture refusée : l'audit ne fait que lire")
 
 // lectureSeule refuse les écritures de l'API avant tout appel réseau, quel que
@@ -114,17 +124,20 @@ func ControlePlan(ctx context.Context, api provision.API, p Provision, coolifyUR
 		plan, err := computePlan(ctx, lectureSeule{api}, cfg, apps)
 		if err != nil {
 			ecarts = append(ecarts, fmt.Sprintf("provision : plan de la VM %s impossible", vm.Name))
-			notes = append(notes, fmt.Sprintf("provision : VM %s : %v", vm.Name, err))
+			notes = append(notes, fmt.Sprintf("provision : VM %s : %s", vm.Name, planProbleme(err)))
 			continue
 		}
-		for _, n := range plan.Notes {
-			notes = append(notes, fmt.Sprintf("provision : VM %s : %s", vm.Name, n))
+		// Les notes de provision peuvent citer une valeur littérale (UPSTREAM) :
+		// seul leur nombre sort, le détail se lit par wafgen provision.
+		n := len(plan.Notes)
+		for i := range plan.Apps {
+			n += len(plan.Apps[i].Notes)
+		}
+		if n > 0 {
+			notes = append(notes, fmt.Sprintf("provision : VM %s : %d note(s) de plan, détail par wafgen provision dans le conteneur", vm.Name, n))
 		}
 		for i := range plan.Apps {
 			ap := &plan.Apps[i]
-			for _, n := range ap.Notes {
-				notes = append(notes, fmt.Sprintf("provision : %s : %s", ap.Name, n))
-			}
 			if !ap.Changed() {
 				continue
 			}

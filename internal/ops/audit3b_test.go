@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"strings"
@@ -209,7 +210,8 @@ func TestControlePlan(t *testing.T) {
 			gotApps = append(gotApps, a.Name)
 		}
 		return &provision.Plan{Notes: []string{"WAF_BASE à remplir"}, Apps: []provision.AppPlan{
-			{App: apps[0], Name: "waf-waf-pilote-preprod", Fields: []provision.Change{{Key: "health_check_enabled", Old: "false", New: "true"}}, Envs: []provision.EnvChange{{Key: "UPSTREAM", Old: "secret-avant", New: "secret-apres"}}},
+			{App: apps[0], Name: "waf-waf-pilote-preprod", Fields: []provision.Change{{Key: "health_check_enabled", Old: "false", New: "true"}}, Envs: []provision.EnvChange{{Key: "UPSTREAM", Old: "secret-avant", New: "secret-apres"}},
+				Notes: []string{`UPSTREAM : valeur littérale "https://secret-origine.osc-fr1.scalingo.io" conservée`}},
 			{App: apps[1], Name: "waf-brouillon-preprod", Create: true},
 			{App: apps[2], Name: "waf-nouvelle-preprod", Create: true},
 		}}, nil
@@ -228,10 +230,17 @@ func TestControlePlan(t *testing.T) {
 		!strings.Contains(ecarts[1], "waf-nouvelle-preprod à créer alors que l'app est en service") || strings.Contains(all, "secret-") {
 		t.Fatalf("écarts : %v", ecarts)
 	}
-	if !strings.Contains(all, "waf-brouillon-preprod à créer, app pas encore en service") || !strings.Contains(all, "VM preprod : WAF_BASE à remplir") {
+	if !strings.Contains(all, "waf-brouillon-preprod à créer, app pas encore en service") || !strings.Contains(all, "VM preprod : 2 note(s) de plan") || strings.Contains(all, "secret-origine") {
 		t.Fatalf("notes : %v", notes)
 	}
 
+	computePlan = func(context.Context, provision.API, provision.Config, []inventory.App) (*provision.Plan, error) {
+		return nil, fmt.Errorf("waf-x : %w", &coolify.HTTPError{Method: "GET", Path: "/api/v1/applications/u/envs", Status: 500, Body: `{"value":"secret-dans-le-corps"}`})
+	}
+	_, notes = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true})
+	if len(notes) != 1 || notes[0] != "provision : VM preprod : Coolify GET /api/v1/applications/u/envs : HTTP 500" {
+		t.Fatalf("corps d'erreur Coolify : %v", notes)
+	}
 	computePlan = func(context.Context, provision.API, provision.Config, []inventory.App) (*provision.Plan, error) {
 		return nil, errors.New("destination dst sur le réseau coolify")
 	}
