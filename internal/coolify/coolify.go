@@ -314,9 +314,6 @@ func (c *Client) CreateTeamEnv(ctx context.Context, e SharedEnvWrite) error {
 	if errors.As(err, &he) {
 		he.Body = "(corps omis)"
 	}
-	if err != nil && e.Value != "" && strings.Contains(err.Error(), e.Value) {
-		return fmt.Errorf("Coolify POST /api/v1/team/envs : échec")
-	}
 	return err
 }
 

@@ -173,7 +173,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return fmt.Errorf("Cloudflare %s %s : %s", method, path, strings.ReplaceAll(err.Error(), c.token, "[jeton]"))
+		return fmt.Errorf("Cloudflare %s %s : %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
@@ -208,8 +208,6 @@ type Zone struct {
 	Status string `json:"status"`
 }
 
-var reID = regexp.MustCompile(`^` + id + `$`)
-
 // Zone rend la seule zone de ce nom visible du jeton.
 func (c *Client) Zone(ctx context.Context, name string) (Zone, error) {
 	if !reHost.MatchString(name) {
@@ -231,27 +229,18 @@ func (c *Client) Zone(ctx context.Context, name string) (Zone, error) {
 		return Zone{}, fmt.Errorf("%s : %w", name, ErrZoneAbsente)
 	case len(found) > 1:
 		return Zone{}, fmt.Errorf("%s : %d zones de ce nom visibles du jeton Cloudflare", name, len(found))
-	case !reID.MatchString(found[0].ID):
-		return Zone{}, fmt.Errorf("%s : identifiant de zone inattendu", name)
 	}
 	return found[0], nil
 }
 
-func zonePath(zoneID string) (string, error) {
-	if !reID.MatchString(zoneID) {
-		return "", fmt.Errorf("identifiant de zone inattendu")
-	}
-	return "/client/v4/zones/" + zoneID, nil
-}
+// Les identifiants viennent de Cloudflare : la liste des routes refuse un
+// chemin dont un segment n'en a pas la forme.
+func zonePath(zoneID string) string { return "/client/v4/zones/" + zoneID }
 
 // Entrypoint rend le ruleset de la phase de la zone, nil s'il n'existe pas.
 func (c *Client) Entrypoint(ctx context.Context, zoneID string) (*Ruleset, error) {
-	zp, err := zonePath(zoneID)
-	if err != nil {
-		return nil, err
-	}
 	var rs Ruleset
-	err = c.do(ctx, http.MethodGet, zp+"/rulesets/phases/"+Phase+"/entrypoint", nil, nil, &rs)
+	err := c.do(ctx, http.MethodGet, zonePath(zoneID)+"/rulesets/phases/"+Phase+"/entrypoint", nil, nil, &rs)
 	var he *HTTPError
 	if errors.As(err, &he) && he.Status == http.StatusNotFound {
 		return nil, nil
@@ -268,10 +257,6 @@ func (c *Client) Entrypoint(ctx context.Context, zoneID string) (*Ruleset, error
 // CreateEntrypoint crée le ruleset de la phase avec la seule règle r. Cloudflare
 // le refuse si la zone en a déjà un : il ne remplace jamais les règles en place.
 func (c *Client) CreateEntrypoint(ctx context.Context, zoneID string, r Want) (*Ruleset, error) {
-	zp, err := zonePath(zoneID)
-	if err != nil {
-		return nil, err
-	}
 	body, err := r.body()
 	if err != nil {
 		return nil, err
@@ -284,7 +269,7 @@ func (c *Client) CreateEntrypoint(ctx context.Context, zoneID string, r Want) (*
 		"rules":       []ruleBody{body},
 	}
 	var rs Ruleset
-	if err := c.do(ctx, http.MethodPost, zp+"/rulesets", nil, in, &rs); err != nil {
+	if err := c.do(ctx, http.MethodPost, zonePath(zoneID)+"/rulesets", nil, in, &rs); err != nil {
 		return nil, err
 	}
 	return &rs, rs.check()
@@ -292,19 +277,12 @@ func (c *Client) CreateEntrypoint(ctx context.Context, zoneID string, r Want) (*
 
 // AddRule ajoute r à la fin du ruleset, sans toucher aux autres règles.
 func (c *Client) AddRule(ctx context.Context, zoneID, rulesetID string, r Want) (*Ruleset, error) {
-	zp, err := zonePath(zoneID)
-	if err != nil {
-		return nil, err
-	}
-	if !reID.MatchString(rulesetID) {
-		return nil, fmt.Errorf("identifiant de ruleset inattendu")
-	}
 	body, err := r.body()
 	if err != nil {
 		return nil, err
 	}
 	var rs Ruleset
-	if err := c.do(ctx, http.MethodPost, zp+"/rulesets/"+rulesetID+"/rules", nil, body, &rs); err != nil {
+	if err := c.do(ctx, http.MethodPost, zonePath(zoneID)+"/rulesets/"+rulesetID+"/rules", nil, body, &rs); err != nil {
 		return nil, err
 	}
 	return &rs, rs.check()
@@ -312,19 +290,12 @@ func (c *Client) AddRule(ctx context.Context, zoneID, rulesetID string, r Want) 
 
 // UpdateRule remplace la seule règle ruleID par r.
 func (c *Client) UpdateRule(ctx context.Context, zoneID, rulesetID, ruleID string, r Want) (*Ruleset, error) {
-	zp, err := zonePath(zoneID)
-	if err != nil {
-		return nil, err
-	}
-	if !reID.MatchString(rulesetID) || !reID.MatchString(ruleID) {
-		return nil, fmt.Errorf("identifiant de ruleset ou de règle inattendu")
-	}
 	body, err := r.body()
 	if err != nil {
 		return nil, err
 	}
 	var rs Ruleset
-	if err := c.do(ctx, http.MethodPatch, zp+"/rulesets/"+rulesetID+"/rules/"+ruleID, nil, body, &rs); err != nil {
+	if err := c.do(ctx, http.MethodPatch, zonePath(zoneID)+"/rulesets/"+rulesetID+"/rules/"+ruleID, nil, body, &rs); err != nil {
 		return nil, err
 	}
 	return &rs, rs.check()

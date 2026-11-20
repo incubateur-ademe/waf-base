@@ -385,3 +385,36 @@ func TestDeuxReglesDeMemeRef(t *testing.T) {
 		t.Fatal("deux règles de même ref acceptées")
 	}
 }
+
+func TestRulesetDUneAutrePhaseRefuse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"result":{"id":"` + rsid + `","phase":"http_request_firewall_custom","rules":[]}}`))
+	}))
+	defer srv.Close()
+	if _, err := client(t, srv.URL).Entrypoint(ctx, zid); err == nil || !strings.Contains(err.Error(), "hors de la phase") {
+		t.Fatalf("erreur : %v", err)
+	}
+}
+
+func TestIdentifiantHorsFormeJamaisEnvoye(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer srv.Close()
+	c := client(t, srv.URL)
+	w := want()
+	calls := []func() error{
+		func() error { _, err := c.Entrypoint(ctx, "../accounts/"+zid); return err },
+		func() error { _, err := c.CreateEntrypoint(ctx, zid+"/x", w); return err },
+		func() error { _, err := c.AddRule(ctx, zid, "../"+rsid, w); return err },
+		func() error { _, err := c.UpdateRule(ctx, zid, rsid, "", w); return err },
+		func() error { _, err := c.UpdateRule(ctx, zid, rsid, strings.ToUpper(zid), w); return err },
+	}
+	for i, call := range calls {
+		if err := call(); err == nil || !strings.Contains(err.Error(), "route hors de la liste du client") {
+			t.Errorf("appel %d : %v", i, err)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("%d requêtes envoyées", hits)
+	}
+}

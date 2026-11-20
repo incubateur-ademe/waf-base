@@ -35,16 +35,8 @@ type Ruleset struct {
 }
 
 func (rs *Ruleset) check() error {
-	if !reID.MatchString(rs.ID) {
-		return fmt.Errorf("Cloudflare : identifiant de ruleset inattendu")
-	}
 	if rs.Phase != Phase {
 		return fmt.Errorf("Cloudflare : ruleset hors de la phase %s", Phase)
-	}
-	for _, r := range rs.Rules {
-		if !reID.MatchString(r.ID) {
-			return fmt.Errorf("Cloudflare : identifiant de règle inattendu")
-		}
 	}
 	return nil
 }
