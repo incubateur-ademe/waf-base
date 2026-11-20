@@ -54,6 +54,8 @@ jobs:
           persist-credentials: false
       - name: Aucun déclencheur pull_request_target ni workflow_run
         run: "! grep -rnE '^[[:space:]]*(pull_request_targe[t]|workflow_ru[n])[[:space:]]*:' .github/workflows/"
+      - name: Config release-please lisible
+        run: jq empty release-please-config.json .release-please-manifest.json
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
           advanced-security: false
