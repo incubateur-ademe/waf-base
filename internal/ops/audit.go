@@ -26,14 +26,7 @@ import (
 func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Time) (Rapport, map[string]time.Time, error) {
 	var r Rapport
 	now := d.Now()
-	var pre Rapport
-	inv, err := loadInventory(ctx, cfg, now, &pre)
-	r.Notes = append(append(r.Notes, pre.Notes...), pre.Ecarts...)
-	r.Cache = pre.Cache
-	if err != nil {
-		return r, curseurs, err
-	}
-	team, err := teamMap(ctx, d.Coolify)
+	inv, team, err := preambule(ctx, cfg, d, &r)
 	if err != nil {
 		return r, curseurs, err
 	}
@@ -116,6 +109,21 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 		return r, next, fmt.Errorf("%d contrôle(s) sans réponse, audit relancé dans %s", incertains, relanceTache)
 	}
 	return r, next, nil
+}
+
+// preambule lit l'inventaire et les variables d'équipe pour une tâche. Les
+// écarts de l'inventaire, que le contrôle des 5 minutes porte déjà, y sont des
+// notes : la tâche les garderait jusqu'à son passage suivant.
+func preambule(ctx context.Context, cfg Config, d Deps, r *Rapport) (inventory.Inventory, map[string]coolify.SharedEnv, error) {
+	var pre Rapport
+	inv, err := loadInventory(ctx, cfg, d.Now(), &pre)
+	r.Notes = append(append(r.Notes, pre.Notes...), pre.Ecarts...)
+	r.Cache = pre.Cache
+	if err != nil {
+		return inv, nil, err
+	}
+	team, err := teamMap(ctx, d.Coolify)
+	return inv, team, err
 }
 
 func coupe(ctx context.Context, i, n int) error {

@@ -74,6 +74,15 @@ type ecrivain interface {
 
 type fgpEcrivain struct{ cfg Config }
 
+var errABlanc = errors.New("à blanc")
+
+// blancEcrivain ne pousse rien : il sert l'aperçu d'un passage.
+type blancEcrivain struct{}
+
+func (blancEcrivain) poser(context.Context, string, string, string, []byte, *cleTLS) (Domain, error) {
+	return Domain{}, errABlanc
+}
+
 // poser envoie la chaîne et la clé sur le domaine par le blob d'écriture de
 // l'app. Le corps n'a que tlscert et tlskey : ni canonical ni
 // letsencrypt_enabled, que le filtre de corps du blob laisserait passer. Aucune

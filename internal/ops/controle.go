@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/incubateur-ademe/waf-base/internal/certs"
+	"github.com/incubateur-ademe/waf-base/internal/cloudflare"
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
 	"github.com/incubateur-ademe/waf-base/internal/policy"
@@ -35,13 +37,15 @@ type Scalingo interface {
 }
 
 type Deps struct {
-	Coolify   TeamEnvs
-	Scalingo  Scalingo
-	Origine   Origine
-	DNS       Resolver
-	Certs     Certificats
-	Provision provision.API
-	Now       func() time.Time
+	Coolify    TeamEnvs
+	Scalingo   Scalingo
+	Origine    Origine
+	DNS        Resolver
+	Certs      Certificats
+	Provision  provision.API
+	Domaines   certs.Lecteur
+	Cloudflare cloudflare.Reader
+	Now        func() time.Time
 }
 
 // Rapport : écarts à corriger, et notes qui n'en sont pas. Cache dit que
