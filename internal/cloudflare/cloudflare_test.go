@@ -479,7 +479,7 @@ func TestAuditAppHorsLiveEtReglesOrphelines(t *testing.T) {
 	e, n := audit(t, f, []inventory.App{horsLive}, team(ptr(secret), false), horsLive, preprod, prod)
 	want := "zone koyo.example.org : règle " + rules[0]["id"].(string) + " sur X-Ademe-Edge hors des règles attendues, à retirer\n" +
 		"zone koyo.example.org : règle " + rules[1]["id"].(string) + " sur X-Ademe-Edge hors des règles attendues, à retirer"
-	if e != want || !strings.Contains(n, "koyo : "+cloudflare.NotLive) || strings.Contains(e+n, "absente") {
+	if e != want || !strings.Contains(n, "koyo : "+cloudflare.NotLive) || strings.Contains(e+n, "absente") || strings.Contains(n, "conforme") {
 		t.Fatalf("écarts :\n%s\nnotes :\n%s", e, n)
 	}
 
