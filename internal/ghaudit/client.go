@@ -123,8 +123,7 @@ func allowed(method, path string, a auth, q url.Values) error {
 	return fmt.Errorf("GitHub %s %s : route hors de la liste du client", method, path)
 }
 
-// do appelle GitHub et décode une réponse 2xx dans out. bearer est le JWT de
-// l'App ou le jeton d'installation, selon a.
+// bearer est le JWT de l'App ou le jeton d'installation, selon a.
 func (c *client) do(ctx context.Context, method, path string, q url.Values, a auth, bearer string, body, out any) error {
 	if err := allowed(method, path, a, q); err != nil {
 		return err
@@ -181,7 +180,7 @@ func (c *client) do(ctx context.Context, method, path string, q url.Values, a au
 	return nil
 }
 
-// list lit une liste paginée par page et per_page, sans suivre l'en-tête Link.
+// Ne suit pas l'en-tête Link : seules les routes de la liste sont appelées.
 func list[T any](ctx context.Context, c *client, path string, q url.Values, token string) ([]T, error) {
 	var all []T
 	for page := 1; page <= maxPages; page++ {

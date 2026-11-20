@@ -9,6 +9,13 @@ import (
 // Emplacements lus par GitHub, dans l'ordre : le premier trouvé fait foi.
 var codeownersPaths = []string{".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
 
+// Bornes du calcul de couverture, bien au-delà d'une CODEOWNERS de startup.
+// Au-delà, un motif est incertain et une CODEOWNERS n'est pas lue.
+const (
+	maxSegs  = 32
+	maxRules = 1000
+)
+
 type coRule struct {
 	line    int
 	pattern string
@@ -69,6 +76,10 @@ func match(pattern, file string) verdict {
 		return incertain
 	}
 	segs := strings.Split(p, "/")
+	parts := strings.Split(file, "/")
+	if len(segs) > maxSegs || len(parts) > maxSegs {
+		return incertain
+	}
 	for _, s := range segs {
 		if s == "" || (strings.Contains(s, "**") && s != "**") {
 			return incertain
@@ -77,7 +88,6 @@ func match(pattern, file string) verdict {
 	if !anchored {
 		segs = append([]string{"**"}, segs...)
 	}
-	parts := strings.Split(file, "/")
 	if !dirOnly && matchSegs(segs, parts) {
 		return oui
 	}
@@ -94,28 +104,29 @@ func match(pattern, file string) verdict {
 }
 
 // matchSegs : ** final couvre au moins un segment, ** de tête ou du milieu zéro
-// ou plus, comme gitignore.
+// ou plus, comme gitignore. Table plutôt que récursion : une CODEOWNERS écrite
+// par la startup ne doit pas pouvoir rendre l'audit exponentiel.
 func matchSegs(pat, parts []string) bool {
-	if len(pat) == 0 {
-		return len(parts) == 0
-	}
-	if pat[0] == "**" {
-		min := 0
-		if len(pat) == 1 {
-			min = 1
-		}
-		for i := min; i <= len(parts); i++ {
-			if matchSegs(pat[1:], parts[i:]) {
-				return true
+	np, nf := len(pat), len(parts)
+	m := make([]bool, (np+1)*(nf+1))
+	at := func(i, j int) int { return i*(nf+1) + j }
+	m[at(np, nf)] = true
+	for i := np - 1; i >= 0; i-- {
+		for j := nf; j >= 0; j-- {
+			var ok bool
+			switch {
+			case pat[i] == "**" && i == np-1:
+				ok = j < nf
+			case pat[i] == "**":
+				ok = m[at(i+1, j)] || (j < nf && m[at(i, j+1)])
+			case j < nf:
+				g, err := path.Match(pat[i], parts[j])
+				ok = err == nil && g && m[at(i+1, j+1)]
 			}
+			m[at(i, j)] = ok
 		}
-		return false
 	}
-	if len(parts) == 0 {
-		return false
-	}
-	ok, err := path.Match(pat[0], parts[0])
-	return err == nil && ok && matchSegs(pat[1:], parts[1:])
+	return m[at(0, 0)]
 }
 
 // covered dit si la dernière règle qui couvre file réserve le fichier à l'équipe

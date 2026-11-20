@@ -1,6 +1,12 @@
 package ghaudit
 
-import "testing"
+import (
+	"context"
+	"path"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestMatch(t *testing.T) {
 	cases := []struct {
@@ -79,5 +85,95 @@ func TestCovered(t *testing.T) {
 				t.Fatalf("covered = %v, attendu %v", got, c.want)
 			}
 		})
+	}
+}
+
+// Un motif écrit par la startup ne doit pas rendre le calcul exponentiel.
+func TestMatchBorne(t *testing.T) {
+	deep := strings.Repeat("d/", 30) + "f"
+	start := time.Now()
+	for _, k := range []int{30, 1000} {
+		p := "/" + strings.Repeat("**/", k) + "zzz"
+		for _, f := range []string{"waf/coraza/config.conf", deep} {
+			match(p, f)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("match en %s", d)
+	}
+	if got := match("/"+strings.Repeat("**/", 40)+"x", "x"); got != incertain {
+		t.Fatalf("motif de plus de %d segments : %d", maxSegs, got)
+	}
+	if got := match("/**/**/**/x", "a/b/c/x"); got != oui {
+		t.Fatalf("** consécutifs : %d", got)
+	}
+	if got := match("/a/**", strings.Repeat("a/", 40)+"x"); got != incertain {
+		t.Fatalf("chemin de plus de %d segments : %d", maxSegs, got)
+	}
+}
+
+func TestCouvertureInterrompue(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rules := parseCodeowners([]byte("/src/ @x\n"), "@incubateur-ademe/secops")
+	if l, err := uncoveredPaths(ctx, rules, nil, []string{"waf/Dockerfile"}); err != nil || len(l) != 1 {
+		t.Fatalf("%q %v", l, err)
+	}
+	cancel()
+	if _, err := uncoveredPaths(ctx, rules, nil, []string{"waf/Dockerfile"}); err == nil {
+		t.Fatal("contexte annulé ignoré")
+	}
+}
+
+// Ancienne récursion, exponentielle mais évidente : référence du calcul par table.
+func matchSegsRef(pat, parts []string) bool {
+	if len(pat) == 0 {
+		return len(parts) == 0
+	}
+	if pat[0] == "**" {
+		min := 0
+		if len(pat) == 1 {
+			min = 1
+		}
+		for i := min; i <= len(parts); i++ {
+			if matchSegsRef(pat[1:], parts[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(parts) == 0 {
+		return false
+	}
+	ok, err := path.Match(pat[0], parts[0])
+	return err == nil && ok && matchSegsRef(pat[1:], parts[1:])
+}
+
+func TestMatchSegsCommeReference(t *testing.T) {
+	atoms := []string{"**", "*", "a", "b", "a*", "?", "*.c"}
+	names := []string{"a", "b", "ab", "x.c", "c"}
+	var pats, files [][]string
+	var gen func(cur []string, src []string, max int, out *[][]string)
+	gen = func(cur []string, src []string, max int, out *[][]string) {
+		*out = append(*out, append([]string(nil), cur...))
+		if len(cur) == max {
+			return
+		}
+		for _, s := range src {
+			gen(append(cur, s), src, max, out)
+		}
+	}
+	gen(nil, atoms, 4, &pats)
+	gen(nil, names, 4, &files)
+	n := 0
+	for _, p := range pats {
+		for _, f := range files {
+			if got, want := matchSegs(p, f), matchSegsRef(p, f); got != want {
+				t.Fatalf("matchSegs(%q, %q) = %v, référence %v", p, f, got, want)
+			}
+			n++
+		}
+	}
+	if n < 1_000_000 {
+		t.Fatalf("%d cas seulement", n)
 	}
 }

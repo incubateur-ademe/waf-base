@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
 )
@@ -29,8 +31,11 @@ const (
 	// DockerfileCanonique est le waf/Dockerfile de chaque app, à l'octet près
 	// (section 5.4 du design).
 	DockerfileCanonique = "ARG WAF_BASE\nFROM ${WAF_BASE}\n"
-	maxCodeowners       = 512 << 10
+	maxCodeowners       = 128 << 10
 	maxListed           = 3
+	maxNoted            = 20
+	maxWafFiles         = 100
+	maxShown            = 120
 )
 
 // Droits de l'App, tous en lecture : le jeton d'installation est demandé avec
@@ -113,6 +118,7 @@ type auditor struct {
 	team   string
 	ops    map[string]bool
 	owners map[string]bool
+	done   map[string]bool
 	ecarts []string
 	notes  []string
 }
@@ -123,6 +129,62 @@ func (a *auditor) ecart(label, format string, args ...any) {
 
 func (a *auditor) note(label, format string, args ...any) {
 	a.notes = append(a.notes, label+" : "+fmt.Sprintf(format, args...))
+}
+
+// once dit si le contrôle de clé k reste à faire : deux apps d'un même repo ne
+// rejouent ni les droits ni la protection.
+func (a *auditor) once(k string) bool {
+	if a.done[k] {
+		return false
+	}
+	a.done[k] = true
+	return true
+}
+
+// shown rend affichable une valeur venue de GitHub, chemin d'un arbre ou
+// login : un nom de fichier admet tout octet sauf NUL et /, et finirait sinon
+// tel quel dans les logs et le pulse.
+func shown(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return '?'
+		}
+		return r
+	}, s)
+	if len(s) <= maxShown {
+		return s
+	}
+	cut := maxShown
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// listed rend au plus n valeurs affichables, puis le nombre des autres.
+func listed(l []string, n int) string {
+	more := ""
+	if len(l) > n {
+		more = fmt.Sprintf(" (+%d)", len(l)-n)
+		l = l[:n]
+	}
+	out := make([]string, len(l))
+	for i, s := range l {
+		out[i] = shown(s)
+	}
+	return strings.Join(out, ", ") + more
+}
+
+func dedup(l []string) []string {
+	seen := map[string]bool{}
+	out := l[:0]
+	for _, s := range l {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Audit contrôle le repo de chaque app : CODEOWNERS qui réserve waf/ à l'équipe
@@ -153,6 +215,7 @@ func Audit(ctx context.Context, cfg Config, apps []inventory.App) (ecarts, notes
 		cfg:  cfg,
 		c:    &client{api: strings.TrimSuffix(cfg.API, "/"), http: newHTTPClient(cfg.HTTP)},
 		team: strings.ToLower("@" + cfg.OpsOrg + "/" + cfg.OpsTeam),
+		done: map[string]bool{},
 	}
 	targets := a.targets(apps)
 	if len(targets) == 0 {
@@ -168,34 +231,36 @@ func Audit(ctx context.Context, cfg Config, apps []inventory.App) (ecarts, notes
 	}
 	tokens := map[string]string{opsOrg: opsTok}
 	failed := map[string]error{}
+	// Un 404 sur la route d'un repo vaut pour ce repo seul : l'installation de
+	// l'owner peut ne pas l'avoir sélectionné et couvrir les suivants.
+	outside := map[string]bool{}
 	for _, t := range targets {
-		o := strings.ToLower(t.owner)
-		if _, ok := tokens[o]; ok {
-			continue
-		}
-		if _, ok := failed[o]; ok {
+		o, r := strings.ToLower(t.owner), strings.ToLower(t.repo)
+		if _, ok := tokens[o]; ok || failed[o] != nil || outside[r] {
 			continue
 		}
 		tok, err := a.installToken(ctx, "/repos/"+t.owner+"/"+t.name+"/installation", t.owner, false)
-		if err != nil {
+		switch {
+		case isStatus(err, http.StatusNotFound):
+			outside[r] = true
+		case err != nil:
 			failed[o] = err
-			continue
+		default:
+			tokens[o] = tok
 		}
-		tokens[o] = tok
 	}
 	for _, t := range targets {
 		o := strings.ToLower(t.owner)
-		if err, ok := failed[o]; ok {
-			if isStatus(err, http.StatusNotFound) {
-				a.ecart(t.repo, "App d'audit GitHub non installée sur %s", t.owner)
-			} else {
-				a.ecart(t.repo, "App d'audit GitHub inutilisable sur %s : %v", t.owner, err)
-			}
-			continue
+		switch {
+		case outside[strings.ToLower(t.repo)]:
+			a.ecart(t.repo, "repo hors de l'installation de l'App d'audit, ou App non installée sur %s", t.owner)
+		case failed[o] != nil:
+			a.ecart(t.repo, "App d'audit GitHub inutilisable sur %s : %v", t.owner, failed[o])
+		default:
+			a.auditTarget(ctx, tokens[o], t)
 		}
-		a.auditTarget(ctx, tokens[o], t)
 	}
-	return a.ecarts, a.notes, nil
+	return dedup(a.ecarts), dedup(a.notes), nil
 }
 
 // targets regroupe les apps par repo, branche et dossier : deux apps qui
@@ -253,8 +318,7 @@ type installation struct {
 	SuspendedAt *string           `json:"suspended_at"`
 }
 
-// installToken trouve l'installation de l'App, vérifie ses droits et demande un
-// jeton limité à la lecture. withOrg ajoute la lecture des membres de l'org.
+// withOrg ajoute la lecture des membres de l'org.
 func (a *auditor) installToken(ctx context.Context, instPath, account string, withOrg bool) (string, error) {
 	jwt, err := appJWT(a.cfg.AppID, a.cfg.Key, a.cfg.Now())
 	if err != nil {
@@ -366,7 +430,7 @@ func (a *auditor) loadOps(ctx context.Context, tok string) error {
 	}
 	if len(outside) > 0 {
 		sort.Strings(outside)
-		a.note(a.cfg.OpsOrg, "propriétaire(s) hors de %s, admins de chaque repo (risque accepté, section 13 du design) : %s", a.team, strings.Join(outside, ", "))
+		a.note(a.cfg.OpsOrg, "propriétaire(s) hors de %s, admins de chaque repo (risque accepté, section 13 du design) : %s", a.team, listed(outside, maxNoted))
 	}
 	return nil
 }
@@ -390,19 +454,24 @@ func (a *auditor) auditTarget(ctx context.Context, tok string, t target) {
 		return
 	}
 	if repo.DefaultBranch != t.branch {
-		a.note(t.repo, "branche déployée %s, branche par défaut %s : contrôles sur %s", t.branch, repo.DefaultBranch, t.branch)
+		a.note(t.repo, "branche déployée %s, branche par défaut %s : contrôles sur %s", t.branch, shown(repo.DefaultBranch), t.branch)
 	}
 	if repo.Archived {
 		a.note(t.repo, "repo archivé")
 	}
-	if err := a.protection(ctx, tok, t, repo.Private); err != nil {
-		a.ecart(t.repo, "protection de %s non auditée : %v", t.branch, err)
+	repoKey := strings.ToLower(t.repo)
+	if a.once("protection\x00" + repoKey + "\x00" + t.branch) {
+		if err := a.protection(ctx, tok, t, repo.Private); err != nil {
+			a.ecart(t.repo, "protection de %s non auditée : %v", t.branch, err)
+		}
 	}
 	if err := a.files(ctx, tok, t); err != nil {
 		a.ecart(t.repo, "fichiers de %s non audités : %v", t.branch, err)
 	}
-	if err := a.access(ctx, tok, t); err != nil {
-		a.ecart(t.repo, "droits non audités : %v", err)
+	if a.once("droits\x00" + repoKey) {
+		if err := a.access(ctx, tok, t); err != nil {
+			a.ecart(t.repo, "droits non audités : %v", err)
+		}
 	}
 }
 
@@ -460,7 +529,7 @@ func (a *auditor) access(ctx context.Context, tok string, t target) error {
 	if len(outside) > 0 {
 		sort.Strings(outside)
 		a.ecart(t.repo, "%d admin(s) hors de %s", len(outside), a.team)
-		a.note(t.repo, "admins hors de %s : %s", a.team, strings.Join(outside, ", "))
+		a.note(t.repo, "admins hors de %s : %s", a.team, listed(outside, maxNoted))
 	}
 	return nil
 }
@@ -469,21 +538,25 @@ type classicProtection struct {
 	Reviews *struct {
 		DismissStale bool `json:"dismiss_stale_reviews"`
 		CodeOwners   bool `json:"require_code_owner_reviews"`
-		LastPush     bool `json:"require_last_push_approval"`
 		Bypass       *struct {
 			Users []json.RawMessage `json:"users"`
 			Teams []json.RawMessage `json:"teams"`
 			Apps  []json.RawMessage `json:"apps"`
 		} `json:"bypass_pull_request_allowances"`
 	} `json:"required_pull_request_reviews"`
-	EnforceAdmins *struct {
-		Enabled bool `json:"enabled"`
-	} `json:"enforce_admins"`
+	EnforceAdmins    *enabled `json:"enforce_admins"`
+	AllowDeletions   *enabled `json:"allow_deletions"`
+	AllowForcePushes *enabled `json:"allow_force_pushes"`
 }
 
-// manques rend ce qui empêche la protection classique de verrouiller waf/ :
-// revue des code owners, approbations révoquées au push, règles appliquées aux
-// administrateurs, aucun contournement (section 8.1 du design).
+type enabled struct {
+	Enabled bool `json:"enabled"`
+}
+
+// Section 8.1 du design. La seule approbation du dernier push ne remplace pas la
+// révocation : une approbation d'ops donnée avant un nouveau commit resterait
+// comptée. Supprimer une branche qui n'est pas celle par défaut puis la recréer
+// par un push contourne la PR.
 func (p classicProtection) manques() []string {
 	r := p.Reviews
 	if r == nil {
@@ -493,11 +566,17 @@ func (p classicProtection) manques() []string {
 	if !r.CodeOwners {
 		m = append(m, "protection sans revue des code owners")
 	}
-	if !r.DismissStale && !r.LastPush {
+	if !r.DismissStale {
 		m = append(m, "protection sans révocation des approbations au push")
 	}
 	if p.EnforceAdmins == nil || !p.EnforceAdmins.Enabled {
 		m = append(m, "protection non appliquée aux administrateurs")
+	}
+	if p.AllowDeletions != nil && p.AllowDeletions.Enabled {
+		m = append(m, "protection qui permet de supprimer la branche")
+	}
+	if p.AllowForcePushes != nil && p.AllowForcePushes.Enabled {
+		m = append(m, "protection qui permet le force push")
 	}
 	if b := r.Bypass; b != nil {
 		if n := len(b.Users) + len(b.Teams) + len(b.Apps); n > 0 {
@@ -516,7 +595,6 @@ type branchRule struct {
 type prRuleParams struct {
 	CodeOwners   bool `json:"require_code_owner_review"`
 	DismissStale bool `json:"dismiss_stale_reviews_on_push"`
-	LastPush     bool `json:"require_last_push_approval"`
 }
 
 // protection cherche une source unique qui verrouille la branche : la
@@ -544,8 +622,12 @@ func (a *auditor) protection(ctx context.Context, tok string, t target, private 
 		return err
 	}
 	rules, err := list[branchRule](ctx, a.c, base+"/rules/branches/"+ref, nil, tok)
-	if err != nil {
+	if err != nil && !(planFree && isStatus(err, http.StatusForbidden)) {
 		return err
+	}
+	types := map[string]bool{}
+	for _, r := range rules {
+		types[r.Type] = true
 	}
 	seen := map[int64]bool{}
 	for _, r := range rules {
@@ -561,8 +643,14 @@ func (a *auditor) protection(ctx context.Context, tok string, t target, private 
 		case !p.CodeOwners:
 			manques = append(manques, fmt.Sprintf("ruleset %d sans revue des code owners", r.RulesetID))
 			continue
-		case !p.DismissStale && !p.LastPush:
+		case !p.DismissStale:
 			manques = append(manques, fmt.Sprintf("ruleset %d sans révocation des approbations au push", r.RulesetID))
+			continue
+		case !types["deletion"]:
+			manques = append(manques, "rulesets sans blocage de la suppression de la branche")
+			continue
+		case !types["non_fast_forward"]:
+			manques = append(manques, "rulesets sans blocage du force push")
 			continue
 		}
 		ok, why, err := a.rulesetLocks(ctx, tok, t, r.RulesetID)
@@ -664,7 +752,6 @@ func (a *auditor) blob(ctx context.Context, tok string, t target, e treeEntry) (
 	return raw, nil
 }
 
-// files lit l'arbre de la branche déployée : CODEOWNERS en vigueur, puis waf/.
 func (a *auditor) files(ctx context.Context, tok string, t target) error {
 	var br struct {
 		Commit struct {
@@ -694,8 +781,8 @@ func (a *auditor) files(ctx context.Context, tok string, t target) error {
 	return a.codeowners(ctx, tok, t, root, wafFiles)
 }
 
-// wafTree contrôle waf/ et rend ses fichiers, relatifs à waf/, pour la
-// couverture de CODEOWNERS. nil sans waf/ lisible.
+// wafTree rend les fichiers de waf/, relatifs à waf/, pour la couverture de
+// CODEOWNERS ; nil sans waf/ lisible.
 func (a *auditor) wafTree(ctx context.Context, tok string, t target, root gitTree) ([]string, error) {
 	cur := root
 	var dir treeEntry
@@ -726,15 +813,22 @@ func (a *auditor) wafTree(ctx context.Context, tok string, t target, root gitTre
 		a.ecart(t.repo, "arbre de %s/ tronqué par GitHub, %s/ non contrôlé", t.dir, t.dir)
 		return nil, nil
 	}
-	var files []string
+	var files, ignores []string
 	for _, e := range tr.Entries {
 		if e.Type == "tree" {
 			continue
 		}
 		files = append(files, e.Path)
 		if strings.HasSuffix(strings.ToLower(path.Base(e.Path)), ".dockerignore") {
-			a.ecart(t.repo, "%s/%s présent : aucun .dockerignore admis dans %s/", t.dir, e.Path, t.dir)
+			ignores = append(ignores, t.dir+"/"+e.Path)
 		}
+	}
+	if len(ignores) > 0 {
+		a.ecart(t.repo, "%d .dockerignore dans %s/, aucun admis : %s", len(ignores), t.dir, listed(ignores, maxListed))
+	}
+	if len(files) > maxWafFiles {
+		a.ecart(t.repo, "%s/ porte %d fichiers, couverture de CODEOWNERS contrôlée sur les %d premiers", t.dir, len(files), maxWafFiles)
+		files = files[:maxWafFiles]
 	}
 	df, ok := find(tr.Entries, "Dockerfile")
 	switch {
@@ -779,6 +873,19 @@ func protectedPaths(dir string, wafFiles []string, effective int) []string {
 		}
 	}
 	return out
+}
+
+func uncoveredPaths(ctx context.Context, rules []coRule, errLines map[int]bool, paths []string) ([]string, error) {
+	var out []string
+	for _, p := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !covered(rules, errLines, p) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 func (a *auditor) codeowners(ctx context.Context, tok string, t target, root gitTree, wafFiles []string) error {
@@ -845,24 +952,20 @@ func (a *auditor) codeowners(ctx context.Context, tok string, t target, root git
 	}
 	if len(lines) > 0 {
 		a.ecart(t.repo, "%s : %d erreur(s) signalée(s) par GitHub", file, len(lines))
-		a.note(t.repo, "erreurs de %s : %s", file, strings.Join(lines, ", "))
+		a.note(t.repo, "erreurs de %s : %s", file, listed(lines, maxNoted))
 	}
 	rules := parseCodeowners(content, a.team)
-	var uncovered []string
-	for _, p := range protectedPaths(t.dir, wafFiles, effective) {
-		if !covered(rules, errLines, p) {
-			uncovered = append(uncovered, p)
-		}
+	if len(rules) > maxRules {
+		a.ecart(t.repo, "%s de plus de %d règles, non lue", file, maxRules)
+		return nil
+	}
+	uncovered, err := uncoveredPaths(ctx, rules, errLines, protectedPaths(t.dir, wafFiles, effective))
+	if err != nil {
+		return err
 	}
 	if len(uncovered) > 0 {
-		shown := uncovered
-		more := ""
-		if len(shown) > maxListed {
-			shown = shown[:maxListed]
-			more = fmt.Sprintf(" (+%d)", len(uncovered)-maxListed)
-		}
-		a.ecart(t.repo, "%s ne réserve pas à %s : %s%s", file, a.team, strings.Join(shown, ", "), more)
-		a.note(t.repo, "fichiers hors de %s dans %s : %s", a.team, file, strings.Join(uncovered, ", "))
+		a.ecart(t.repo, "%s ne réserve pas à %s : %s", file, a.team, listed(uncovered, maxListed))
+		a.note(t.repo, "fichiers hors de %s dans %s : %s", a.team, file, listed(uncovered, maxNoted))
 	}
 	return nil
 }
