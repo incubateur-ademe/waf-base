@@ -32,6 +32,11 @@ type Fake struct {
 	// Fail : statut renvoyé pour « MÉTHODE chemin », avec un message qui recopie
 	// la requête, comme une erreur de validation.
 	Fail map[string]int
+	// OmitEnabled : enabled absent des règles actives renvoyées, comme le
+	// permet le schéma (défaut true).
+	OmitEnabled bool
+	// Status : statut d'une zone, active par défaut.
+	Status map[string]string
 }
 
 type ruleset struct {
@@ -41,7 +46,7 @@ type ruleset struct {
 
 // New démarre le faux, arrêté à la fin du test.
 func New(t testing.TB, token string) *Fake {
-	f := &Fake{t: t, Token: token, zones: map[string]string{}, sets: map[string]*ruleset{}, Fail: map[string]int{}}
+	f := &Fake{t: t, Token: token, zones: map[string]string{}, sets: map[string]*ruleset{}, Fail: map[string]int{}, Status: map[string]string{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	f.URL = srv.URL
@@ -144,8 +149,19 @@ func reply(w http.ResponseWriter, code int, result any, errs ...map[string]any) 
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": code < 300, "errors": errs, "messages": []any{}, "result": result})
 }
 
-func (rs *ruleset) json() map[string]any {
-	return map[string]any{"id": rs.ID, "name": "default", "kind": "zone", "phase": Phase, "version": "1", "rules": rs.Rules}
+func (f *Fake) json(rs *ruleset) map[string]any {
+	rules := make([]map[string]any, 0, len(rs.Rules))
+	for _, r := range rs.Rules {
+		c := map[string]any{}
+		for k, v := range r {
+			c[k] = v
+		}
+		if f.OmitEnabled && c["enabled"] == true {
+			delete(c, "enabled")
+		}
+		rules = append(rules, c)
+	}
+	return map[string]any{"id": rs.ID, "name": "default", "kind": "zone", "phase": Phase, "version": "1", "rules": rules}
 }
 
 func (rs *ruleset) refTaken(ref, except string) bool {
@@ -196,7 +212,11 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		out := []map[string]any{}
 		if id, ok := f.zones[name]; ok {
-			out = append(out, map[string]any{"id": id, "name": name, "status": "active"})
+			st := f.Status[name]
+			if st == "" {
+				st = "active"
+			}
+			out = append(out, map[string]any{"id": id, "name": name, "status": st})
 		}
 		reply(w, 200, out)
 	case r.Method == http.MethodGet && reEntry.MatchString(p):
@@ -206,7 +226,7 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, 404, nil, map[string]any{"code": 10003, "message": "could not find entrypoint ruleset in the '" + m[2] + "' phase"})
 			return
 		}
-		reply(w, 200, rs.json())
+		reply(w, 200, f.json(rs))
 	case r.Method == http.MethodPost && reSets.MatchString(p):
 		zid := reSets.FindStringSubmatch(p)[1]
 		if body["kind"] != "zone" || body["phase"] != Phase {
@@ -229,7 +249,7 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rs.Rules = append(rs.Rules, n)
 		}
 		f.sets[zid] = rs
-		reply(w, 200, rs.json())
+		reply(w, 200, f.json(rs))
 	case r.Method == http.MethodPost && reRules.MatchString(p):
 		m := reRules.FindStringSubmatch(p)
 		rs := f.sets[m[1]]
@@ -243,7 +263,7 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rs.Rules = append(rs.Rules, n)
-		reply(w, 200, rs.json())
+		reply(w, 200, f.json(rs))
 	case r.Method == http.MethodPatch && reRule.MatchString(p):
 		m := reRule.FindStringSubmatch(p)
 		rs := f.sets[m[1]]
@@ -261,7 +281,7 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			rs.Rules[i] = n
-			reply(w, 200, rs.json())
+			reply(w, 200, f.json(rs))
 			return
 		}
 		reply(w, 404, nil, map[string]any{"code": 10003, "message": "règle introuvable"})

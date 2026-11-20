@@ -953,6 +953,10 @@ func Apply(ctx context.Context, api API, cfg Config, p *Plan) error {
 			key := cloudflare.SecretKey(ap.App)
 			err = api.CreateTeamEnv(ctx, coolify.SharedEnvWrite{Key: key, Value: s,
 				Comment: "Secret d'edge du WAF de " + ap.App.Name + " (IDR-0039), généré par wafgen provision"})
+			var he *coolify.HTTPError
+			if errors.As(err, &he) && he.Status == http.StatusForbidden {
+				return fmt.Errorf("%s : création de %s : %w ; Coolify n'autorise la création qu'à un admin de l'équipe", ap.Name, key, err)
+			}
 			if err != nil {
 				return fmt.Errorf("%s : création de %s : %w", ap.Name, key, err)
 			}

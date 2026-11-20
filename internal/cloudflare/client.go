@@ -77,8 +77,13 @@ func (e *HTTPError) Error() string {
 	return msg
 }
 
-// ErrZoneAbsente : aucune zone de ce nom n'est visible du jeton.
-var ErrZoneAbsente = errors.New("zone absente ou hors du jeton Cloudflare")
+var (
+	// ErrZoneAbsente : aucune zone de ce nom n'est visible du jeton.
+	ErrZoneAbsente = errors.New("zone absente ou hors du jeton Cloudflare")
+	// ErrZoneInactive : la zone visible n'est pas active ; le trafic passe
+	// ailleurs, une règle posée là ne s'appliquerait pas.
+	ErrZoneInactive = errors.New("zone non active chez Cloudflare")
+)
 
 type Client struct {
 	base  *url.URL
@@ -229,6 +234,8 @@ func (c *Client) Zone(ctx context.Context, name string) (Zone, error) {
 		return Zone{}, fmt.Errorf("%s : %w", name, ErrZoneAbsente)
 	case len(found) > 1:
 		return Zone{}, fmt.Errorf("%s : %d zones de ce nom visibles du jeton Cloudflare", name, len(found))
+	case found[0].Status != "active":
+		return Zone{}, fmt.Errorf("%s : %w", name, ErrZoneInactive)
 	}
 	return found[0], nil
 }

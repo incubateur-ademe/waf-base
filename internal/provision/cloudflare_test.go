@@ -362,3 +362,37 @@ func TestMainJetonCloudflare(t *testing.T) {
 		t.Fatalf("jeton invalide : %v", err)
 	}
 }
+
+func TestEdgeCloudflareEnabledAbsentEtZoneInactive(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	koyoTeam(f)
+	f.addShared("EDGE_SECRET_KOYO", ptr(edgeSecretFactice))
+	cf := cftest.New(t, cfToken)
+	cf.AddZone("koyo.example.org")
+	cf.OmitEnabled = true
+	out, err := runCF(t, srv.URL, cf, koyoZones(t), true, edgeSecretFactice)
+	if err != nil {
+		t.Fatalf("enabled absent : %v\n%s", err, out)
+	}
+	mustContain(t, out, "idempotence vérifiée")
+
+	cf.Status["koyo.example.org"] = "pending"
+	out, err = runCF(t, srv.URL, cf, koyoZones(t), false, edgeSecretFactice)
+	if err == nil || !strings.Contains(err.Error(), "koyo.example.org : zone non active chez Cloudflare") {
+		t.Fatalf("zone pending : %v\n%s", err, out)
+	}
+}
+
+func TestCreationDuSecretRefuseeHorsAdmin(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	koyoTeam(f)
+	f.notAdmin = true
+	out, err := run(t, srv.URL, koyoEdge(t), true)
+	if err == nil || !strings.Contains(err.Error(), "création de EDGE_SECRET_KOYO : Coolify POST /api/v1/team/envs : HTTP 403") ||
+		!strings.Contains(err.Error(), "admin de l'équipe") {
+		t.Fatalf("erreur : %v\n%s", err, out)
+	}
+	if f.appByName("waf-koyo-1") != nil {
+		t.Fatal("app créée malgré l'échec de la variable d'équipe")
+	}
+}

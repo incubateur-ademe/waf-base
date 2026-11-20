@@ -80,9 +80,13 @@ func Audit(ctx context.Context, r Reader, apps []inventory.App, team map[string]
 	sort.Strings(zones)
 	for _, z := range zones {
 		st, err := ReadZone(ctx, r, z)
-		if errors.Is(err, ErrZoneAbsente) {
+		if errors.Is(err, ErrZoneAbsente) || errors.Is(err, ErrZoneInactive) {
+			etat := "absente ou hors du jeton Cloudflare"
+			if errors.Is(err, ErrZoneInactive) {
+				etat = "non active chez Cloudflare"
+			}
 			for _, w := range byZone[z] {
-				ecarts = append(ecarts, fmt.Sprintf("%s : zone %s absente ou hors du jeton Cloudflare", w.App, z))
+				ecarts = append(ecarts, fmt.Sprintf("%s : zone %s %s", w.App, z, etat))
 			}
 			continue
 		}

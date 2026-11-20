@@ -46,7 +46,7 @@ func (rs *Ruleset) check() error {
 type Rule struct {
 	ID               string          `json:"id"`
 	Ref              string          `json:"ref"`
-	Enabled          bool            `json:"enabled"`
+	Enabled          *bool           `json:"enabled"`
 	Action           string          `json:"action"`
 	Expression       string          `json:"expression"`
 	ActionParameters json.RawMessage `json:"action_parameters"`
@@ -181,7 +181,8 @@ func Diff(cur Rule, w Want, checkValue bool) []string {
 	if cur.Action != "rewrite" {
 		out = append(out, "action autre que rewrite")
 	}
-	if !cur.Enabled {
+	// Champ optionnel, true par défaut côté Cloudflare.
+	if cur.Enabled != nil && !*cur.Enabled {
 		out = append(out, "règle désactivée")
 	}
 	ops, others, ok := cur.header()

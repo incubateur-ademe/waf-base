@@ -427,8 +427,33 @@ func TestRegleIllisibleSignalee(t *testing.T) {
 	if got := st.Foreign(); len(got) != 1 || got[0] != zid {
 		t.Fatalf("règles étrangères : %v", got)
 	}
-	d := cloudflare.Diff(cloudflare.Rule{Action: "rewrite", Enabled: true, Expression: expr, ActionParameters: []byte(`{"headers":[1]}`)}, want(), true)
+	d := cloudflare.Diff(cloudflare.Rule{Action: "rewrite", Expression: expr, ActionParameters: []byte(`{"headers":[1]}`)}, want(), true)
 	if strings.Join(d, " ; ") != "paramètres d'action illisibles" {
 		t.Fatalf("écarts : %v", d)
+	}
+}
+
+func TestEnabledAbsentEtZoneInactive(t *testing.T) {
+	f := cftest.New(t, token)
+	f.AddZone("koyo.example.org")
+	f.AddRule("koyo.example.org", rule("waf-edge-koyo", expr, true, map[string]any{"X-Ademe-Edge": set(secret)}))
+	f.OmitEnabled = true
+	apps := []inventory.App{koyo("koyo.example.org")}
+	e, n := audit(t, f, apps, team(ptr(secret), false))
+	if e != "" || !strings.Contains(n, "conforme") {
+		t.Fatalf("enabled absent lu comme désactivée :\n%s\n%s", e, n)
+	}
+	for _, st := range []string{"pending", "moved", ""} {
+		f.Status["koyo.example.org"] = st
+		e, _ = audit(t, f, apps, team(ptr(secret), false))
+		if st == "" {
+			if e != "" {
+				t.Fatalf("statut vide lu comme actif attendu :\n%s", e)
+			}
+			continue
+		}
+		if e != "koyo : zone koyo.example.org non active chez Cloudflare" {
+			t.Fatalf("statut %s : écarts :\n%s", st, e)
+		}
 	}
 }

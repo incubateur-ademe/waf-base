@@ -40,6 +40,9 @@ type fakeCoolify struct {
 	createLandsOn string
 	// ignorePatch liste les champs que le PATCH d'app accepte sans les écrire.
 	ignorePatch map[string]bool
+	// notAdmin : le compte du jeton n'est pas admin de l'équipe, Coolify refuse
+	// la création d'une variable partagée (policy create).
+	notAdmin bool
 }
 
 type fakeDest struct{ Name, Network, Server string }
@@ -389,6 +392,8 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out = append(out, m)
 		}
 		write(w, 200, out)
+	case r.Method == "POST" && p == "/api/v1/team/envs" && f.notAdmin:
+		write(w, 403, map[string]any{"message": "This action is unauthorized."})
 	case r.Method == "POST" && p == "/api/v1/team/envs":
 		for k := range body {
 			if !teamEnvFields[k] {
