@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/incubateur-ademe/waf-base/internal/cloudflare"
+	"github.com/incubateur-ademe/waf-base/internal/inventory"
 )
 
 type Config struct {
@@ -19,6 +22,13 @@ type Config struct {
 	// OtherVMs : les autres VM de l'inventaire. Une app de même nom sur l'une
 	// d'elles est un jumeau, qui porte déjà les domaines de l'app.
 	OtherVMs []string
+	// CloudflareToken n'est requis que pour une app avec edge_zones. Sans
+	// Cloudflare, le plan n'en vérifie pas les règles.
+	CloudflareToken string
+	Cloudflare      cloudflare.API
+	// Inventory : toutes les apps de l'inventaire, tous stages. Une règle
+	// d'edge qu'aucune n'attend est à retirer. Sans elle, les apps traitées.
+	Inventory []inventory.App
 }
 
 const DefaultBaseRef = "{{team.WAF_BASE}}"
@@ -43,6 +53,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		GithubAppUUID:   get("WAF_OPS_GITHUB_APP_UUID"),
 		VM:              get("WAF_OPS_VM"),
 		BaseRef:         get("WAF_OPS_BASE_REF"),
+		CloudflareToken: get(cloudflare.TokenEnv),
 	}
 	var missing []string
 	for _, r := range []struct{ k, v string }{
