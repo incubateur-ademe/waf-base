@@ -43,6 +43,7 @@ type Config struct {
 	FGP          FGP
 	PulseURL     string
 	State        string
+	Provision    *Provision
 }
 
 // StageList rend les stages traités, triés, pour les messages.
@@ -123,6 +124,11 @@ func LoadConfig(getenv func(string) string, mode Mode) (Config, error) {
 			return Config{}, err
 		}
 		c.FGP = fgp
+		p, err := parseProvision(get("WAF_OPS_PROVISION"))
+		if err != nil {
+			return Config{}, err
+		}
+		c.Provision = p
 	}
 	if c.PulseURL != "" {
 		if u, err := url.Parse(c.PulseURL); err != nil || u.Scheme != "https" || u.Host == "" {

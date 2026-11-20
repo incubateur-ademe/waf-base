@@ -171,6 +171,34 @@ func TestEdge(t *testing.T) {
 	}
 }
 
+func TestEdgeZones(t *testing.T) {
+	y := base + `
+  app-a:
+    repo: incubateur-ademe/a
+    platform: scalingo
+    hosts: [a.example.org, www.a.example.org, x.preprod.a.example.org, a.beta.gouv.fr]
+    edge: cloudflare
+    edge_zones: [a.example.org, preprod.a.example.org]
+  app-b:
+    repo: incubateur-ademe/b
+    platform: scalingo
+    hosts: [b.example.org]
+    edge: cloudflare
+`
+	apps, err := Parse([]byte(y), platforms(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zh := apps[0].ZoneHosts()
+	if len(zh) != 2 || strings.Join(zh["a.example.org"], ",") != "a.example.org,www.a.example.org" ||
+		strings.Join(zh["preprod.a.example.org"], ",") != "x.preprod.a.example.org" {
+		t.Fatalf("hosts par zone : %v", zh)
+	}
+	if len(apps[1].EdgeZones) != 0 || len(apps[1].ZoneHosts()) != 0 {
+		t.Fatalf("app-b sans edge_zones : %v", apps[1].ZoneHosts())
+	}
+}
+
 func TestStages(t *testing.T) {
 	y := base + `
   app-a:
@@ -233,6 +261,15 @@ func TestErreurs(t *testing.T) {
 		{"edge inconnu", app("    edge: fastly\n"), `edge "fastly" : cloudflare seule valeur admise`},
 		{"edge en majuscules", app("    edge: Cloudflare\n"), "cloudflare seule valeur admise"},
 		{"edge dans defaults", strings.Replace(app("    edge: cloudflare\n"), "defaults:\n", "defaults:\n  edge: cloudflare\n", 1), "edge propre à une app, interdit dans defaults"},
+		{"edge_zones sans edge", app("    edge_zones: [example.org]\n"), "edge_zones sans edge"},
+		{"edge_zones dans defaults", strings.Replace(app("    edge: cloudflare\n"), "defaults:\n", "defaults:\n  edge_zones: [example.org]\n", 1), "edge_zones propre à une app, interdit dans defaults"},
+		{"edge_zones sans host", app("    edge: cloudflare\n    edge_zones: [example.com]\n"), "zone example.com sans host de l'app"},
+		{"edge_zones suffixe sans point", app("    edge: cloudflare\n    edge_zones: [ple.org]\n"), "zone ple.org sans host de l'app"},
+		{"edge_zones masquée par une zone plus longue", app("    edge: cloudflare\n    edge_zones: [example.org, a.example.org]\n"), "zone example.org sans host de l'app"},
+		{"edge_zones en double", app("    edge: cloudflare\n    edge_zones: [example.org, example.org]\n"), "zone example.org en double"},
+		{"edge_zones invalide", app("    edge: cloudflare\n    edge_zones: [\"Example.org\"]\n"), `zone "Example.org" invalide`},
+		{"edge_zones avec virgule", app("    edge: cloudflare\n    edge_zones: [\"example.org,a.example.org\"]\n"), "invalide"},
+		{"edge_zones guillemet", app("    edge: cloudflare\n    edge_zones: ['\"} or true or {\"']\n"), "invalide"},
 		{"stage inconnu", app("    stage: staging\n"), `stage "staging" : prod ou preprod`},
 		{"stage dans defaults", strings.Replace(app(""), "defaults:\n", "defaults:\n  stage: preprod\n", 1), "stage propre à une app, interdit dans defaults"},
 		{"stage sans VM", strings.Replace(app("    stage: preprod\n"), "  preprod: { stage: preprod, ip: 51.15.20.30 }\n", "", 1), "aucune VM du stage preprod"},

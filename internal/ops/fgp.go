@@ -15,7 +15,7 @@ import (
 
 // Routes que le client accepte d'appeler : lecture seule, pour une app nommée.
 // Le blob borne aussi chaque appel, mais une route hors liste n'est jamais tentée.
-var reFGPPath = regexp.MustCompile(`^/v1/apps/[a-z0-9][a-z0-9-]{0,62}/(firewall_rules|domains)$`)
+var reFGPPath = regexp.MustCompile(`^/v1/apps/[a-z0-9][a-z0-9-]{0,62}/(firewall_rules|domains|events\?page=([1-9]|1[0-9]|20)&per_page=100)$`)
 
 var reApp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
@@ -83,6 +83,9 @@ func (c *FGPClient) get(ctx context.Context, region, path string, out any) error
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// L'erreur de transport cite l'URL, sans les en-têtes : ni clé ni blob.
 		var ue *url.Error
 		if errors.As(err, &ue) {
