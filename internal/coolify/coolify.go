@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -86,6 +87,10 @@ func New(baseURL, token string) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Path != "" {
 		return nil, fmt.Errorf("COOLIFY_URL : http(s)://<hôte>[:port] attendu, sans chemin")
+	}
+	// Le jeton et EDGE_SECRET_<APP> créée par provision ne partent jamais en clair.
+	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && (ip == nil || !ip.IsLoopback()) {
+		return nil, fmt.Errorf("COOLIFY_URL : https attendu hors de la boucle locale")
 	}
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("COOLIFY_TOKEN vide")

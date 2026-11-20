@@ -229,6 +229,10 @@ type AppPlan struct {
 	patch     map[string]any
 	secret    string
 	literal   string
+	// twinLiterals, twinUnreadable : WAF_EDGE_SECRET des jumeaux, lus pour ne
+	// pas désapparier un WAF en service sur une autre VM.
+	twinLiterals   []string
+	twinUnreadable []string
 }
 
 // RulePlan est la règle waf-edge-<app> à poser dans une zone Cloudflare.
@@ -563,13 +567,18 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 	if err != nil {
 		return nil, err
 	}
+	all := cfg.Inventory
+	if all == nil {
+		all = apps
+	}
+	expected := cloudflare.Expected(all)
 	zones := map[string]cloudflare.ZoneState{}
 	for _, app := range apps {
 		ap, err := computeApp(ctx, api, cfg, app, list, vars, p.githubAppID)
 		if err != nil {
 			return nil, fmt.Errorf("%s : %w", ResourceName(app, cfg.VM), err)
 		}
-		if err := planEdge(ctx, cfg.Cloudflare, p, &ap, secrets[app.Name], gen[app.Name], zones); err != nil {
+		if err := planEdge(ctx, cfg.Cloudflare, p, &ap, secrets[app.Name], gen[app.Name], zones, expected); err != nil {
 			return nil, fmt.Errorf("%s : %w", ResourceName(app, cfg.VM), err)
 		}
 		p.Apps = append(p.Apps, ap)
@@ -580,22 +589,39 @@ func Compute(ctx context.Context, api API, cfg Config, apps []inventory.App) (*P
 const noCloudflare = "règles Cloudflare non vérifiées : " + cloudflare.TokenEnv + " absent"
 
 // planEdge prévoit le secret et les règles d'une app en edge cloudflare. La
-// règle n'est posée que pour une telle app : une autre n'a pas de secret à
-// recevoir. Elle s'ajoute ou se modifie seule, sans réécrire la phase.
-func planEdge(ctx context.Context, cf cloudflare.API, p *Plan, ap *AppPlan, s cloudflare.Secret, gen bool, zones map[string]cloudflare.ZoneState) error {
+// règle n'est posée que pour une telle app en service : une autre n'a pas le
+// WAF sur son chemin, son origine recevrait le secret. Elle s'ajoute ou se
+// modifie seule, sans réécrire la phase.
+func planEdge(ctx context.Context, cf cloudflare.API, p *Plan, ap *AppPlan, s cloudflare.Secret, gen bool, zones map[string]cloudflare.ZoneState, expected map[string]map[string]bool) error {
 	app := ap.App
 	if app.Edge != render.EdgeCloudflare {
 		return nil
 	}
 	key := cloudflare.SecretKey(app)
 	ap.GenSecret = gen
-	switch {
-	case s.Defaut == "":
+	if s.Defaut == "" {
 		ap.secret = s.Value
-	case gen && ap.literal != "":
-		// Le WAF en service et une règle posée à la main portent déjà cette
-		// valeur : une valeur neuve les désapparierait.
-		ap.Adopt, ap.secret = true, ap.literal
+	}
+	if gen {
+		if len(ap.twinUnreadable) > 0 {
+			return fmt.Errorf("WAF_EDGE_SECRET de %s illisible : le jeton doit avoir read:sensitive", strings.Join(ap.twinUnreadable, ", "))
+		}
+		lits := map[string]bool{}
+		for _, l := range append([]string{ap.literal}, ap.twinLiterals...) {
+			if l != "" {
+				lits[l] = true
+			}
+		}
+		switch {
+		case len(lits) > 1:
+			return fmt.Errorf("WAF_EDGE_SECRET littéraux différents entre l'app et ses jumeaux : créer %s à la main avec la valeur de la règle Cloudflare", key)
+		case len(lits) == 1:
+			// Les WAF en service et une règle posée à la main portent déjà cette
+			// valeur : une valeur neuve les désapparierait.
+			for l := range lits {
+				ap.Adopt, ap.secret = true, l
+			}
+		}
 	}
 	switch {
 	case len(app.EdgeZones) == 0:
@@ -613,6 +639,9 @@ func planEdge(ctx context.Context, cf cloudflare.API, p *Plan, ap *AppPlan, s cl
 		}
 		return nil
 	}
+	if !app.Live {
+		ap.Notes = append(ap.Notes, cloudflare.NotLive)
+	}
 	for _, w := range cloudflare.Wants(app, ap.secret) {
 		st, ok := zones[w.Zone]
 		if !ok {
@@ -621,9 +650,12 @@ func planEdge(ctx context.Context, cf cloudflare.API, p *Plan, ap *AppPlan, s cl
 				return fmt.Errorf("zone Cloudflare %s : %w", w.Zone, err)
 			}
 			zones[w.Zone] = st
-			for _, id := range st.Foreign() {
-				p.Notes = append(p.Notes, fmt.Sprintf("action ops : retirer de la zone %s la règle %s, qui touche %s hors de provision", w.Zone, id, cloudflare.Header))
+			for _, id := range st.Foreign(expected[w.Zone]) {
+				p.Notes = append(p.Notes, fmt.Sprintf("action ops : retirer de la zone %s la règle %s, qui touche %s hors des règles attendues", w.Zone, id, cloudflare.Header))
 			}
+		}
+		if !app.Live {
+			continue
 		}
 		cur, err := st.Managed(w.Ref())
 		if err != nil {
@@ -681,6 +713,11 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		if twins[a.Name] {
 			if err := checkTwin(ctx, api, a, cfg); err != nil {
 				return ap, err
+			}
+			if app.Edge == render.EdgeCloudflare {
+				if err := readTwinSecret(ctx, api, &ap, a); err != nil {
+					return ap, err
+				}
 			}
 			ap.Twins = append(ap.Twins, a.Name)
 			if ap.twinUUIDs == nil {
@@ -840,6 +877,24 @@ func computeApp(ctx context.Context, api API, cfg Config, app inventory.App, lis
 		ap.Notes = append(ap.Notes, fmt.Sprintf("variable hors liste conservée : %s", k))
 	}
 	return ap, nil
+}
+
+func readTwinSecret(ctx context.Context, api API, ap *AppPlan, twin coolify.AppSummary) error {
+	envs, err := api.ListApplicationEnvs(ctx, twin.UUID)
+	if err != nil {
+		return err
+	}
+	for _, e := range envs {
+		if e.IsPreview || e.Key != "WAF_EDGE_SECRET" {
+			continue
+		}
+		if !e.Value.Set {
+			ap.twinUnreadable = append(ap.twinUnreadable, twin.Name)
+		} else if v := envValue(e); cloudflare.ValidSecret(v) {
+			ap.twinLiterals = append(ap.twinLiterals, v)
+		}
+	}
+	return nil
 }
 
 // checkTwin refuse un jumeau sur le serveur visé : Coolify contrôle les

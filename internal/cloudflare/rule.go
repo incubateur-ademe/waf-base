@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
+	"github.com/incubateur-ademe/waf-base/internal/render"
 )
 
 // Header : en-tête que la règle pose, et que le WAF compare à WAF_EDGE_SECRET.
@@ -255,16 +256,36 @@ func (s ZoneState) Managed(ref string) (*Rule, error) {
 	return found, nil
 }
 
-// Foreign rend l'identifiant des règles de la phase qui touchent Header sans
-// être gérées par provision : une copie du secret hors des deux endroits prévus,
-// ou une règle qui le retire.
-func (s ZoneState) Foreign() []string {
+// Expected rend, par zone, la référence des règles attendues : une par zone
+// d'une app en edge cloudflare et en service. Une app pas encore live n'a pas
+// le WAF sur son chemin : sa règle enverrait le secret à l'origine actuelle.
+func Expected(all []inventory.App) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, a := range all {
+		if a.Edge != render.EdgeCloudflare || !a.Live {
+			continue
+		}
+		for z := range a.ZoneHosts() {
+			if out[z] == nil {
+				out[z] = map[string]bool{}
+			}
+			out[z][Ref(a.Name)] = true
+		}
+	}
+	return out
+}
+
+// Foreign rend l'identifiant des règles de la phase qui touchent Header hors
+// des références attendues dans la zone : copie du secret hors des deux
+// endroits prévus, règle d'une app sortie d'edge ou d'une zone retirée, ou
+// règle qui retire l'en-tête.
+func (s ZoneState) Foreign(expected map[string]bool) []string {
 	if s.Ruleset == nil {
 		return nil
 	}
 	var out []string
 	for _, r := range s.Ruleset.Rules {
-		if strings.HasPrefix(r.Ref, RefPrefix) && reApp.MatchString(strings.TrimPrefix(r.Ref, RefPrefix)) {
+		if expected[r.Ref] {
 			continue
 		}
 		if r.touchesHeader() {

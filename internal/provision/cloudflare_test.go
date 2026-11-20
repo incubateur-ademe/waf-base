@@ -18,12 +18,21 @@ const cfToken = "jeton-cloudflare-de-test-qui-ne-doit-jamais-sortir"
 
 const koyoExpr = `(http.host in {"koyo.example.org" "www.koyo.example.org"})`
 
-// koyoZones : koyo en edge, avec la zone koyo.example.org, et koyo-preprod dont
-// le host est dans la même zone.
+// koyoZones : koyo en edge et en service, avec la zone koyo.example.org, et
+// koyo-preprod dont le host est dans la même zone.
 func koyoZones(t *testing.T, names ...string) []inventory.App {
 	t.Helper()
+	return koyoZonesLive(t, true, names...)
+}
+
+func koyoZonesLive(t *testing.T, live bool, names ...string) []inventory.App {
+	t.Helper()
 	y := strings.Replace(testInventory, "hosts: [koyo.example.org, www.koyo.example.org]\n",
-		"hosts: [koyo.example.org, www.koyo.example.org]\n    edge: cloudflare\n    edge_zones: [koyo.example.org]\n", 1) + `
+		"hosts: [koyo.example.org, www.koyo.example.org]\n    edge: cloudflare\n    edge_zones: [koyo.example.org]\n", 1)
+	if live {
+		y = strings.Replace(y, "    host_header: upstream\n    live: false\n", "    host_header: upstream\n    live: true\n", 1)
+	}
+	y += `
   koyo-preprod:
     repo: incubateur-ademe/koyo
     platform: koyeb
@@ -31,6 +40,7 @@ func koyoZones(t *testing.T, names ...string) []inventory.App {
     host_header: upstream
     edge: cloudflare
     edge_zones: [koyo.example.org]
+    live: true
 `
 	apps, err := inventory.Parse([]byte(y), map[string]bool{"scalingo": true, "koyeb": true})
 	if err != nil {
@@ -60,11 +70,15 @@ func koyoTeam(f *fakeCoolify) {
 
 func runCF(t *testing.T, url string, cf *cftest.Fake, apps []inventory.App, apply bool, secrets ...string) (string, error) {
 	t.Helper()
-	c, err := coolify.New(url, testToken)
+	return runCFCfg(t, testConfig(url), cf, apps, apply, secrets...)
+}
+
+func runCFCfg(t *testing.T, cfg Config, cf *cftest.Fake, apps []inventory.App, apply bool, secrets ...string) (string, error) {
+	t.Helper()
+	c, err := coolify.New(cfg.URL, testToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := testConfig(url)
 	if cf != nil {
 		if cfg.Cloudflare, err = cloudflare.NewAt(cf.URL, cfToken); err != nil {
 			t.Fatal(err)
@@ -260,7 +274,7 @@ func TestEdgeCloudflareRegleEtrangereSignalee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustContain(t, out, "! action ops : retirer de la zone koyo.example.org la règle "+manuelle+", qui touche X-Ademe-Edge hors de provision", "idempotence vérifiée")
+	mustContain(t, out, "! action ops : retirer de la zone koyo.example.org la règle "+manuelle+", qui touche X-Ademe-Edge hors des règles attendues", "idempotence vérifiée")
 	if after := cf.Rules("koyo.example.org"); !reflect.DeepEqual(after[0], before[0]) {
 		t.Fatal("règle manuelle modifiée")
 	}
@@ -394,5 +408,139 @@ func TestCreationDuSecretRefuseeHorsAdmin(t *testing.T) {
 	}
 	if f.appByName("waf-koyo-1") != nil {
 		t.Fatal("app créée malgré l'échec de la variable d'équipe")
+	}
+}
+
+func TestEdgeCloudflareHorsLive(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	koyoTeam(f)
+	cf := cftest.New(t, cfToken)
+	cf.AddZone("koyo.example.org")
+	apps := koyoZonesLive(t, false)
+	out, err := runCF(t, srv.URL, cf, apps, true)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "+ variable d'équipe EDGE_SECRET_KOYO = (générée, valeur masquée)", "! "+cloudflare.NotLive, "idempotence vérifiée")
+	if len(cf.Writes()) != 0 || strings.Contains(out, "règle Cloudflare waf-edge") {
+		t.Fatalf("règle posée pour une app hors live : %v\n%s", cf.Writes(), out)
+	}
+
+	id := cf.AddRule("koyo.example.org", map[string]any{"ref": "waf-edge-koyo", "action": "rewrite", "expression": koyoExpr,
+		"action_parameters": map[string]any{"headers": map[string]any{"X-Ademe-Edge": map[string]any{"operation": "set", "value": edgeSecretFactice}}}})
+	out, err = runCF(t, srv.URL, cf, apps, false, edgeSecretFactice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, out, "! action ops : retirer de la zone koyo.example.org la règle "+id+", qui touche X-Ademe-Edge hors des règles attendues")
+	if len(cf.Writes()) != 0 {
+		t.Fatalf("écritures Cloudflare : %v", cf.Writes())
+	}
+}
+
+func TestEdgeCloudflareRegleDUneAppSortieDEdge(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	koyoTeam(f)
+	f.addShared("EDGE_SECRET_KOYO", ptr(edgeSecretFactice))
+	cf := cftest.New(t, cfToken)
+	cf.AddZone("koyo.example.org")
+	orpheline := cf.AddRule("koyo.example.org", map[string]any{"ref": "waf-edge-koyo-preprod", "action": "rewrite", "expression": "true",
+		"action_parameters": map[string]any{"headers": map[string]any{"X-Ademe-Edge": map[string]any{"operation": "set", "value": "ancien-" + edgeSecretFactice}}}})
+	cfg := testConfig(srv.URL)
+	all := koyoZones(t, "koyo", "koyo-preprod")
+	all[1].Edge, all[1].EdgeZones = "", nil
+	cfg.Inventory = all
+	out, err := runCFCfg(t, cfg, cf, all[:1], true, edgeSecretFactice)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "! action ops : retirer de la zone koyo.example.org la règle "+orpheline+", qui touche X-Ademe-Edge hors des règles attendues", "idempotence vérifiée")
+
+	cfg.Inventory = koyoZones(t, "koyo", "koyo-preprod")
+	out, err = runCFCfg(t, cfg, cf, all[:1], false, edgeSecretFactice)
+	if err != nil || strings.Contains(out, "action ops : retirer") {
+		t.Fatalf("règle d'une app en edge d'un autre stage signalée : %v\n%s", err, out)
+	}
+}
+
+func TestEdgeLitteralDuJumeau(t *testing.T) {
+	for _, tc := range []struct {
+		name, self, err string
+		hidden          bool
+	}{
+		{name: "repris"},
+		{name: "même valeur des deux côtés", self: edgeSecretFactice},
+		{name: "valeurs différentes", self: "autre-" + edgeSecretFactice, err: "WAF_EDGE_SECRET littéraux différents entre l'app et ses jumeaux : créer EDGE_SECRET_KOYO à la main"},
+		{name: "jumeau illisible", hidden: true, err: "WAF_EDGE_SECRET de waf-koyo-1 illisible"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFake(t, testToken)
+			koyoTeam(f)
+			twin := f.addApp("waf-koyo-1", "dest-waf", nil)
+			twin.setEnv(f, "WAF_EDGE_SECRET", ptr(edgeSecretFactice), false, true)
+			twin.hidden = tc.hidden
+			if tc.self != "" {
+				self := f.addApp("waf-koyo-preprod", "dest-waf-preprod", nil)
+				self.setEnv(f, "WAF_EDGE_SECRET", ptr(tc.self), false, true)
+			}
+			cf := cftest.New(t, cfToken)
+			cf.AddZone("koyo.example.org")
+			out, err := runCFCfg(t, preprodConfig(srv.URL), cf, koyoZones(t), true, edgeSecretFactice, tc.self)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) || f.shared("EDGE_SECRET_KOYO") != nil || len(cf.Writes()) != 0 {
+					t.Fatalf("erreur : %v\n%s", err, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			mustContain(t, out, "(valeur littérale de WAF_EDGE_SECRET reprise, masquée)", "idempotence vérifiée")
+			if sh := f.shared("EDGE_SECRET_KOYO"); sh == nil || *sh.Value != edgeSecretFactice || edgeValue(t, cf.Rules("koyo.example.org")[0]) != edgeSecretFactice {
+				t.Fatal("littéral du jumeau non repris")
+			}
+		})
+	}
+}
+
+func TestMainInventaireComplet(t *testing.T) {
+	f, srv := newFake(t, testToken)
+	koyoTeam(f)
+	f.addShared("EDGE_SECRET_KOYO", ptr(edgeSecretFactice))
+	cf := cftest.New(t, cfToken)
+	cf.AddZone("koyo.example.org")
+	cf.AddRule("koyo.example.org", map[string]any{"ref": "waf-edge-koyo-preprod", "action": "rewrite", "expression": `(http.host in {"preprod.koyo.example.org"})`,
+		"action_parameters": map[string]any{"headers": map[string]any{"X-Ademe-Edge": map[string]any{"operation": "set", "value": "autre-" + edgeSecretFactice}}}})
+	y := strings.Replace(testInventory, "hosts: [koyo.example.org, www.koyo.example.org]\n",
+		"hosts: [koyo.example.org, www.koyo.example.org]\n    edge: cloudflare\n    edge_zones: [koyo.example.org]\n", 1)
+	y = strings.Replace(y, "    host_header: upstream\n    live: false\n", "    host_header: upstream\n    live: true\n", 1) + `
+  koyo-preprod:
+    repo: incubateur-ademe/koyo
+    platform: koyeb
+    hosts: [preprod.koyo.example.org]
+    host_header: upstream
+    edge: cloudflare
+    edge_zones: [koyo.example.org]
+    live: true
+`
+	inv := t.TempDir() + "/inventaire.yaml"
+	if err := os.WriteFile(inv, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := newCloudflare
+	newCloudflare = func(token string) (cloudflare.API, error) { return cloudflare.NewAt(cf.URL, token) }
+	t.Cleanup(func() { newCloudflare = prev })
+	env := map[string]string{
+		"COOLIFY_URL": srv.URL, "COOLIFY_TOKEN": testToken, "WAF_OPS_PROJECT_UUID": "proj-waf", "CLOUDFLARE_API_TOKEN": cfToken,
+		"WAF_OPS_SERVER_UUID": "srv-waf-1", "WAF_OPS_DESTINATION_UUID": "dest-waf", "WAF_OPS_GITHUB_APP_UUID": ghAppUUID,
+	}
+	var out, errw bytes.Buffer
+	err := Main(context.Background(), []string{"--etc", "../..", "--inventaire", inv, "--app", "koyo"}, func(k string) string { return env[k] }, &out, &errw)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, errw.String())
+	}
+	mustContain(t, out.String(), "+ règle Cloudflare waf-edge-koyo, zone koyo.example.org")
+	if strings.Contains(out.String(), "action ops : retirer") || strings.Contains(out.String(), edgeSecretFactice) {
+		t.Fatalf("règle de koyo-preprod signalée hors de l'inventaire complet :\n%s", out.String())
 	}
 }

@@ -29,6 +29,9 @@ WAF_OPS_ENVIRONMENT (production), WAF_OPS_VM (1, une VM de vms dans l'inventaire
 WAF_OPS_BASE_REF ({{team.WAF_BASE}}, ou {{server.WAF_BASE}} pour une base par VM),
 CLOUDFLARE_API_TOKEN (requis pour une app avec edge_zones).`
 
+// newCloudflare est remplacé par les tests, pour viser un faux Cloudflare.
+var newCloudflare = func(token string) (cloudflare.API, error) { return cloudflare.New(token) }
+
 // Main lit les options et l'environnement, puis lance provision. La configuration
 // est vérifiée avant toute lecture réseau.
 func Main(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) error {
@@ -65,6 +68,7 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 	if err != nil {
 		return err
 	}
+	cfg.Inventory = inv.Apps
 	vm, ok := inv.VM(cfg.VM)
 	if !ok {
 		return fmt.Errorf("VM %q absente de vms dans l'inventaire", cfg.VM)
@@ -102,7 +106,7 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 		if cfg.CloudflareToken == "" {
 			return fmt.Errorf("%s manquant, requis pour les edge_zones de %s", cloudflare.TokenEnv, strings.Join(zoned, ", "))
 		}
-		cf, err := cloudflare.New(cfg.CloudflareToken)
+		cf, err := newCloudflare(cfg.CloudflareToken)
 		if err != nil {
 			return err
 		}

@@ -165,7 +165,7 @@ func TestZone(t *testing.T) {
 }
 
 func koyo(zones ...string) inventory.App {
-	return inventory.App{Name: "koyo", Edge: "cloudflare", Hosts: []string{"www.koyo.example.org", "koyo.example.org", "koyo.beta.gouv.fr"}, EdgeZones: zones}
+	return inventory.App{Name: "koyo", Edge: "cloudflare", Live: true, Hosts: []string{"www.koyo.example.org", "koyo.example.org", "koyo.beta.gouv.fr"}, EdgeZones: zones}
 }
 
 func want() cloudflare.Want {
@@ -289,9 +289,12 @@ func TestEdgeSecret(t *testing.T) {
 	}
 }
 
-func audit(t *testing.T, f *cftest.Fake, apps []inventory.App, tm map[string]coolify.SharedEnv) (string, string) {
+func audit(t *testing.T, f *cftest.Fake, apps []inventory.App, tm map[string]coolify.SharedEnv, all ...inventory.App) (string, string) {
 	t.Helper()
-	ecarts, notes, err := cloudflare.Audit(ctx, client(t, f.URL), apps, tm)
+	if all == nil {
+		all = apps
+	}
+	ecarts, notes, err := cloudflare.Audit(ctx, client(t, f.URL), apps, all, tm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,10 +342,12 @@ func TestAudit(t *testing.T) {
 	manuelle := f.Rules("koyo.example.org")[0]["id"].(string)
 
 	e, n = audit(t, f, apps, tm)
+	autre := f.Rules("koyo.example.org")[2]["id"].(string)
 	want := []string{
 		"koyo : règle waf-edge-koyo de la zone beta.gouv.fr : règle désactivée",
 		"koyo : règle waf-edge-koyo de la zone beta.gouv.fr : valeur de X-Ademe-Edge différente du secret de l'app",
-		"zone koyo.example.org : règle " + manuelle + " hors de waf-ops sur X-Ademe-Edge, à retirer",
+		"zone koyo.example.org : règle " + manuelle + " sur X-Ademe-Edge hors des règles attendues, à retirer",
+		"zone koyo.example.org : règle " + autre + " sur X-Ademe-Edge hors des règles attendues, à retirer",
 	}
 	if e != strings.Join(want, "\n") {
 		t.Fatalf("écarts :\n%s\nattendus :\n%s", e, strings.Join(want, "\n"))
@@ -373,7 +378,8 @@ func TestAuditErreurDeLecture(t *testing.T) {
 	f := cftest.New(t, token)
 	z := f.AddZone("koyo.example.org")
 	f.Fail["GET /client/v4/zones/"+z+"/rulesets/phases/http_request_late_transform/entrypoint"] = 403
-	_, _, err := cloudflare.Audit(ctx, client(t, f.URL), []inventory.App{koyo("koyo.example.org")}, team(ptr(secret), false))
+	apps := []inventory.App{koyo("koyo.example.org")}
+	_, _, err := cloudflare.Audit(ctx, client(t, f.URL), apps, apps, team(ptr(secret), false))
 	if err == nil || !strings.Contains(err.Error(), "permission absente") || strings.Contains(err.Error(), token) {
 		t.Fatalf("erreur : %v", err)
 	}
@@ -424,7 +430,7 @@ func TestRegleIllisibleSignalee(t *testing.T) {
 		{ID: zid, Ref: "manuelle", ActionParameters: []byte(`"illisible"`)},
 		{ID: rsid, Ref: "sans-parametres"},
 	}}}
-	if got := st.Foreign(); len(got) != 1 || got[0] != zid {
+	if got := st.Foreign(nil); len(got) != 1 || got[0] != zid {
 		t.Fatalf("règles étrangères : %v", got)
 	}
 	d := cloudflare.Diff(cloudflare.Rule{Action: "rewrite", Expression: expr, ActionParameters: []byte(`{"headers":[1]}`)}, want(), true)
@@ -455,5 +461,30 @@ func TestEnabledAbsentEtZoneInactive(t *testing.T) {
 		if e != "koyo : zone koyo.example.org non active chez Cloudflare" {
 			t.Fatalf("statut %s : écarts :\n%s", st, e)
 		}
+	}
+}
+
+func TestAuditAppHorsLiveEtReglesOrphelines(t *testing.T) {
+	f := cftest.New(t, token)
+	f.AddZone("koyo.example.org")
+	f.AddRule("koyo.example.org", rule("waf-edge-koyo", expr, true, map[string]any{"X-Ademe-Edge": set(secret)}))
+	preprod := inventory.App{Name: "koyo-preprod", Live: true, Hosts: []string{"preprod.koyo.example.org"}}
+	prod := inventory.App{Name: "koyo-prod", Edge: "cloudflare", Live: true, Hosts: []string{"prod.koyo.example.org"}, EdgeZones: []string{"koyo.example.org"}}
+	f.AddRule("koyo.example.org", rule("waf-edge-koyo-preprod", "true", true, map[string]any{"X-Ademe-Edge": set("ancien-" + secret)}))
+	f.AddRule("koyo.example.org", rule("waf-edge-koyo-prod", `(http.host in {"prod.koyo.example.org"})`, true, map[string]any{"X-Ademe-Edge": set("autre-" + secret)}))
+	rules := f.Rules("koyo.example.org")
+	horsLive := koyo("koyo.example.org")
+	horsLive.Live = false
+
+	e, n := audit(t, f, []inventory.App{horsLive}, team(ptr(secret), false), horsLive, preprod, prod)
+	want := "zone koyo.example.org : règle " + rules[0]["id"].(string) + " sur X-Ademe-Edge hors des règles attendues, à retirer\n" +
+		"zone koyo.example.org : règle " + rules[1]["id"].(string) + " sur X-Ademe-Edge hors des règles attendues, à retirer"
+	if e != want || !strings.Contains(n, "koyo : "+cloudflare.NotLive) || strings.Contains(e+n, "absente") {
+		t.Fatalf("écarts :\n%s\nnotes :\n%s", e, n)
+	}
+
+	e, _ = audit(t, f, []inventory.App{koyo("koyo.example.org")}, team(ptr(secret), false), koyo("koyo.example.org"), preprod, prod)
+	if e != "zone koyo.example.org : règle "+rules[1]["id"].(string)+" sur X-Ademe-Edge hors des règles attendues, à retirer" {
+		t.Fatalf("écarts :\n%s", e)
 	}
 }

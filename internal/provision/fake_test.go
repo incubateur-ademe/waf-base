@@ -52,6 +52,8 @@ type fakeApp struct {
 	dest  string
 	extra []string
 	envs  []*fakeEnv
+	// hidden : valeurs omises du GET, comme pour un jeton sans read:sensitive.
+	hidden bool
 }
 
 type fakeEnv struct {
@@ -354,7 +356,12 @@ func (f *fakeCoolify) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a := f.apps[reAppEnvs.FindStringSubmatch(p)[1]]
 		var out []map[string]any
 		for _, e := range a.envs {
-			out = append(out, envJSON(e))
+			m := envJSON(e)
+			if a.hidden {
+				delete(m, "value")
+				delete(m, "real_value")
+			}
+			out = append(out, m)
 		}
 		write(w, 200, out)
 	case r.Method == "GET" && reDest.MatchString(p):

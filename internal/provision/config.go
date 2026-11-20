@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/incubateur-ademe/waf-base/internal/cloudflare"
+	"github.com/incubateur-ademe/waf-base/internal/inventory"
 )
 
 type Config struct {
@@ -25,6 +26,9 @@ type Config struct {
 	// Cloudflare, le plan n'en vérifie pas les règles.
 	CloudflareToken string
 	Cloudflare      cloudflare.API
+	// Inventory : toutes les apps de l'inventaire, tous stages. Une règle
+	// d'edge qu'aucune n'attend est à retirer. Sans elle, les apps traitées.
+	Inventory []inventory.App
 }
 
 const DefaultBaseRef = "{{team.WAF_BASE}}"

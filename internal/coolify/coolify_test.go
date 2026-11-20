@@ -151,13 +151,18 @@ func TestTroncatureSurUneRune(t *testing.T) {
 }
 
 func TestURL(t *testing.T) {
-	for _, u := range []string{"ftp://x", "https://x/api", "https://u:p@x", "x"} {
+	for _, u := range []string{"ftp://x", "https://x/api", "https://u:p@x", "x", "http://ops.example.org", "http://51.15.20.30:8000", "http://localhost:8000"} {
 		if _, err := New(u, "t"); err == nil {
 			t.Errorf("%s acceptée", u)
 		}
 	}
 	if _, err := New("https://ops.example.org/", ""); err == nil {
 		t.Error("jeton vide accepté")
+	}
+	for _, u := range []string{"https://ops.example.org", "http://127.0.0.1:8000", "http://[::1]:8000"} {
+		if _, err := New(u, "t"); err != nil {
+			t.Errorf("%s refusée : %v", u, err)
+		}
 	}
 }
 
