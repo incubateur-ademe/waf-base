@@ -195,13 +195,29 @@ func TestFGPInjoignable(t *testing.T) {
 	}
 }
 
-// fakeScalingo : règles et domaines par app, erreurs forcées par app.
+// fakeScalingo : règles, domaines et événements par app, erreurs forcées par app.
 type fakeScalingo struct {
 	regions map[string]bool
 	rules   map[string][]FirewallRule
 	domains map[string][]Domain
+	events  map[string][]Evenement
+	tronque map[string]bool
 	err     map[string]error
 	calls   []string
+}
+
+func (f *fakeScalingo) Events(_ context.Context, region, app string, depuis time.Time) ([]Evenement, bool, error) {
+	f.calls = append(f.calls, "events "+region+" "+app+" "+depuis.UTC().Format(time.RFC3339))
+	if e := f.err[app]; e != nil {
+		return nil, false, e
+	}
+	var out []Evenement
+	for _, e := range f.events[app] {
+		if e.A.After(depuis) {
+			out = append(out, e)
+		}
+	}
+	return out, f.tronque[app], nil
 }
 
 func (f *fakeScalingo) HasRegion(r string) bool { return f.regions[r] }

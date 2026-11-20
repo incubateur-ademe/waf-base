@@ -11,15 +11,22 @@ import (
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
 )
 
-const Usage = `wafgen ops [controle | fgp-scopes]
+const Usage = `wafgen ops [controle | audit | fgp-scopes]
 
-  (sans argument)  boucle : contrôle toutes les 5 minutes, pulse updown, état dans WAF_OPS_STATE
-  controle         un passage : notes et écarts sur la sortie, code 1 s'il y a un écart ; pas de pulse
+  (sans argument)  boucle : contrôle toutes les 5 minutes, audit toutes les heures, pulse updown,
+                   état dans WAF_OPS_STATE
+  controle         un contrôle : notes et écarts sur la sortie, code 1 s'il y a un écart ; pas de pulse
+  audit            un audit depuis les curseurs de l'état, sans les avancer ni écrire l'état ; pas de pulse
   fgp-scopes       demandes de blobs d'API de lecture, une par région, au format de /api/generate de FGP
 
 Contrôle : pour chaque app live et Scalingo des stages traités, règles du
 firewall égales aux IP des VM de son stage si LOCK_<APP> est posée, et chaque
 host rattaché à l'app en host_header visitor.
+
+Audit : Activity Scalingo de chaque app depuis l'audit précédent (règles et
+domaines ajoutés ou retirés, SCALINGO_FORBIDDEN_PAGE_URL), puis, si l'app est
+verrouillée, 403 du firewall sur son origine. Ses écarts restent dans le pulse
+jusqu'à l'audit suivant.
 
 Environnement : COOLIFY_URL, COOLIFY_TOKEN (read:sensitive, pour UPSTREAM_<APP>),
 WAF_OPS_STAGES (prod, preprod, ou les deux séparés par une virgule),
@@ -48,7 +55,7 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 	mode := ModeBoucle
 	switch cmd {
 	case "":
-	case "controle":
+	case "controle", "audit":
 		mode = ModeControle
 	case "fgp-scopes":
 		mode = ModeScopes
@@ -71,9 +78,18 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 		}
 		return writeScopes(stdout, s)
 	}
-	d := Deps{Coolify: cl, Scalingo: NewFGPClient(cfg.FGP), Now: nowFunc}
+	d := Deps{Coolify: cl, Scalingo: NewFGPClient(cfg.FGP), Origine: Sonde{}, Now: nowFunc}
 	if mode == ModeControle {
-		r, err := Controle(ctx, cfg, d)
+		var r Rapport
+		if cmd == "audit" {
+			e, lerr := LireEtat(cfg.State)
+			if lerr != nil {
+				return lerr
+			}
+			r, _, err = Audit(ctx, cfg, d, e.Taches["audit"].Curseurs)
+		} else {
+			r, err = Controle(ctx, cfg, d)
+		}
 		for _, n := range r.Notes {
 			fmt.Fprintf(stdout, "note : %s\n", n)
 		}
@@ -90,8 +106,9 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 		return nil
 	}
 	l := log.New(stderr, "wafgen ops: ", 0)
-	l.Printf("boucle : stages %v, contrôle toutes les %s", cfg.StageList(), Interval)
-	Boucle(ctx, cfg, d, HTTPPulse{URL: cfg.PulseURL}, l.Printf, Interval)
+	l.Printf("boucle : stages %v, contrôle toutes les %s, audit toutes les %s", cfg.StageList(), Interval, PeriodeAudit)
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: HTTPPulse{URL: cfg.PulseURL}, Logf: l.Printf, Taches: []Tache{TacheAudit(cfg, d)}}
+	o.Boucle(ctx, Interval)
 	l.Printf("arrêt")
 	return nil
 }

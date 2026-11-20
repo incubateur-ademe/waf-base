@@ -30,11 +30,13 @@ type Scalingo interface {
 	HasRegion(region string) bool
 	FirewallRules(ctx context.Context, region, app string) ([]FirewallRule, error)
 	Domains(ctx context.Context, region, app string) ([]Domain, error)
+	Events(ctx context.Context, region, app string, depuis time.Time) ([]Evenement, bool, error)
 }
 
 type Deps struct {
 	Coolify  TeamEnvs
 	Scalingo Scalingo
+	Origine  Origine
 	Now      func() time.Time
 }
 
@@ -181,18 +183,25 @@ func Controle(ctx context.Context, cfg Config, d Deps) (Rapport, error) {
 	if err != nil {
 		return r, err
 	}
-	envs, err := d.Coolify.ListTeamEnvs(ctx)
+	team, err := teamMap(ctx, d.Coolify)
 	if err != nil {
-		return r, fmt.Errorf("variables d'équipe Coolify : %w", err)
-	}
-	team := map[string]coolify.SharedEnv{}
-	for _, e := range envs {
-		team[e.Key] = e
+		return r, err
 	}
 	ips := map[string][]string{}
 	for _, v := range inv.VMs {
 		ips[v.Stage] = append(ips[v.Stage], v.IP+"/32")
 	}
+	for _, a := range perimetre(inv, cfg, &r) {
+		r.Apps++
+		controleApp(ctx, d, a, team, ips[a.Stage], &r)
+	}
+	return r, nil
+}
+
+// perimetre rend les apps live et Scalingo des stages traités, et note les
+// autres apps de ces stages.
+func perimetre(inv inventory.Inventory, cfg Config, r *Rapport) []inventory.App {
+	var out []inventory.App
 	for _, a := range inv.Apps {
 		if !cfg.Stages[a.Stage] {
 			continue
@@ -205,36 +214,63 @@ func Controle(ctx context.Context, cfg Config, d Deps) (Rapport, error) {
 			r.Notes = append(r.Notes, fmt.Sprintf("%s : plateforme %s, hors contrôle FGP", a.Name, a.Platform))
 			continue
 		}
-		r.Apps++
-		controleApp(ctx, d, a, team, ips[a.Stage], &r)
+		out = append(out, a)
 	}
-	return r, nil
+	return out
 }
 
-func controleApp(ctx context.Context, d Deps, a inventory.App, team map[string]coolify.SharedEnv, want []string, r *Rapport) {
+// teamMap indexe les variables d'équipe par nom.
+func teamMap(ctx context.Context, c TeamEnvs) (map[string]coolify.SharedEnv, error) {
+	envs, err := c.ListTeamEnvs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("variables d'équipe Coolify : %w", err)
+	}
+	team := map[string]coolify.SharedEnv{}
+	for _, e := range envs {
+		team[e.Key] = e
+	}
+	return team, nil
+}
+
+// cible lit l'app et la région Scalingo de l'app dans UPSTREAM_<APP>. Un échec
+// est un écart : l'app n'est alors pas contrôlée.
+func cible(a inventory.App, team map[string]coolify.SharedEnv, s Scalingo, r *Rapport) (app, region string, ok bool) {
 	key := "UPSTREAM_" + a.EnvSuffix()
 	up := teamValue(team, key)
 	switch {
 	case !up.exists:
 		r.ecart(a.Name, "%s absente des variables d'équipe", key)
-		return
+		return "", "", false
 	case !up.readable:
 		r.ecart(a.Name, "%s illisible (jeton sans read:sensitive ou variable verrouillée)", key)
-		return
+		return "", "", false
 	}
 	app, region, err := scalingoTarget(up.value)
 	if err != nil {
 		r.ecart(a.Name, "%s : %v", key, err)
-		return
+		return "", "", false
 	}
-	if !d.Scalingo.HasRegion(region) {
+	if !s.HasRegion(region) {
 		r.ecart(a.Name, "aucun blob FGP pour la région %s", region)
+		return "", "", false
+	}
+	return app, region, true
+}
+
+// verrouillee : LOCK_<APP> posée. Une valeur illisible compte comme posée, pour
+// que le contrôle se fasse.
+func verrouillee(a inventory.App, team map[string]coolify.SharedEnv) bool {
+	lock := teamValue(team, "LOCK_"+a.EnvSuffix())
+	return lock.exists && (!lock.readable || strings.TrimSpace(lock.value) != "")
+}
+
+func controleApp(ctx context.Context, d Deps, a inventory.App, team map[string]coolify.SharedEnv, want []string, r *Rapport) {
+	app, region, ok := cible(a, team, d.Scalingo, r)
+	if !ok {
 		return
 	}
 	where := app + " (" + region + ")"
-	// Une valeur illisible compte comme posée : le contrôle des règles se fait.
-	lock := teamValue(team, "LOCK_"+a.EnvSuffix())
-	if lock.exists && (!lock.readable || strings.TrimSpace(lock.value) != "") {
+	if verrouillee(a, team) {
 		rules, err := d.Scalingo.FirewallRules(ctx, region, app)
 		if err != nil {
 			r.ecart(a.Name, "règles du firewall de %s : %s", where, fgpProblem(err))

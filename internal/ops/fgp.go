@@ -15,7 +15,7 @@ import (
 
 // Routes que le client accepte d'appeler : lecture seule, pour une app nommée.
 // Le blob borne aussi chaque appel, mais une route hors liste n'est jamais tentée.
-var reFGPPath = regexp.MustCompile(`^/v1/apps/[a-z0-9][a-z0-9-]{0,62}/(firewall_rules|domains)$`)
+var reFGPPath = regexp.MustCompile(`^/v1/apps/[a-z0-9][a-z0-9-]{0,62}/(firewall_rules|domains|events\?page=[1-9]&per_page=100)$`)
 
 var reApp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
