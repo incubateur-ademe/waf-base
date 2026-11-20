@@ -1,8 +1,11 @@
 package certs
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -86,6 +89,65 @@ func TestCopierEchecSansStderr(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-de-stderr") {
 		t.Errorf("la sortie d'erreur de la VM entre dans l'erreur : %v", err)
+	}
+}
+
+// Avant toute vérification de clé d'hôte, un pair quelconque peut envoyer un
+// SSH_MSG_DISCONNECT au texte libre : il n'entre pas dans l'erreur.
+func TestCopierDeconnexionPiegee(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	const piege = "ALERTE waf-1 compromis\nwafgen ops: note : fausse ligne"
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = c.Write([]byte("SSH-2.0-faux\r\n"))
+		_, _ = bufio.NewReader(c).ReadString('\n')
+		var payload []byte
+		payload = append(payload, 1)
+		payload = binary.BigEndian.AppendUint32(payload, 2)
+		payload = binary.BigEndian.AppendUint32(payload, uint32(len(piege)))
+		payload = append(payload, piege...)
+		payload = binary.BigEndian.AppendUint32(payload, 0)
+		pad := 8 - (5+len(payload))%8
+		if pad < 4 {
+			pad += 8
+		}
+		pkt := binary.BigEndian.AppendUint32(nil, uint32(1+len(payload)+pad))
+		pkt = append(pkt, byte(pad))
+		pkt = append(pkt, payload...)
+		pkt = append(pkt, make([]byte, pad)...)
+		_, _ = c.Write(pkt)
+		time.Sleep(200 * time.Millisecond)
+	}()
+	ap := netip.MustParseAddrPort(ln.Addr().String())
+	cfg := Config{
+		Signer:     signerEd25519(t),
+		VMs:        map[string]netip.Addr{"preprod": ap.Addr()},
+		KnownHosts: map[netip.Addr][]ssh.PublicKey{ap.Addr(): {signerEd25519(t).PublicKey()}},
+		sshPort:    int(ap.Port()),
+	}
+	_, err = sshCopieur{cfg: cfg}.copier(context.Background(), "preprod")
+	if err == nil || !strings.Contains(err.Error(), "poignée de main en échec") {
+		t.Fatalf("erreur %v", err)
+	}
+	if strings.Contains(err.Error(), "ALERTE") {
+		t.Errorf("texte du pair dans l'erreur : %v", err)
+	}
+}
+
+func TestCopierAuthRefusee(t *testing.T) {
+	client, autre, hote := signerEd25519(t), signerEd25519(t), signerEd25519(t)
+	srv := demarrerSSH(t, autre.PublicKey(), "force", []byte("{}"), hote)
+	_, err := sshCopieur{cfg: cfgSSH(client, srv, hote.PublicKey())}.copier(context.Background(), "preprod")
+	if err == nil || !strings.Contains(err.Error(), "authentification refusée") {
+		t.Fatalf("erreur %v", err)
 	}
 }
 

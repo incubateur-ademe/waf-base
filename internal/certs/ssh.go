@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -76,7 +77,7 @@ func (s sshCopieur) copier(ctx context.Context, vm string) ([]byte, error) {
 		if errors.As(err, &he) {
 			return nil, he
 		}
-		return nil, fmt.Errorf("SSH vers %s : %v", addr, err)
+		return nil, fmt.Errorf("SSH vers %s : %s", addr, raisonSSH(err))
 	}
 	client := ssh.NewClient(cc, chans, reqs)
 	defer client.Close()
@@ -109,6 +110,15 @@ func (s sshCopieur) copier(ctx context.Context, vm string) ([]byte, error) {
 		return nil, fmt.Errorf("acme.json de %s : vide", addr)
 	}
 	return out.buf.Bytes(), nil
+}
+
+// raisonSSH rend un texte fixe : avant la vérification de la clé d'hôte,
+// l'erreur peut reprendre le message de déconnexion d'un pair quelconque.
+func raisonSSH(err error) string {
+	if strings.Contains(err.Error(), "unable to authenticate") {
+		return "authentification refusée (clé absente d'authorized_keys2 ou from= qui ne correspond pas)"
+	}
+	return "poignée de main en échec"
 }
 
 // hoteInconnu : la VM présente une clé d'hôte hors de known_hosts. Seule

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Sous ce délai avant expiration, un certificat est un écart (section 3.7 du design).
@@ -41,12 +42,33 @@ type passage struct {
 	ecarts, notes []string
 }
 
+const (
+	maxEcart = 300
+	maxNote  = 1000
+)
+
 func (p *passage) ecart(qui, format string, a ...any) {
-	p.ecarts = append(p.ecarts, qui+" : "+fmt.Sprintf(format, a...))
+	p.ecarts = append(p.ecarts, propre(qui+" : "+fmt.Sprintf(format, a...), maxEcart))
 }
 
 func (p *passage) note(qui, format string, a ...any) {
-	p.notes = append(p.notes, qui+" : "+fmt.Sprintf(format, a...))
+	p.notes = append(p.notes, propre(qui+" : "+fmt.Sprintf(format, a...), maxNote))
+}
+
+// propre rend une ligne bornée sans caractère de contrôle. Les erreurs reprises
+// portent du texte venu d'ailleurs (noms d'un certificat présenté à la place de
+// FGP, erreur du lecteur) : un retour à la ligne y forgerait une entrée de log.
+func propre(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return '?'
+		}
+		return r
+	}, s)
+	if r := []rune(s); len(r) > max {
+		return string(r[:max-1]) + "…"
+	}
+	return s
 }
 
 // Quotidien copie acme.json de chaque VM, puis, pour chaque app, pousse sur

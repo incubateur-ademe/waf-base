@@ -15,7 +15,13 @@ const (
 	gardees = 7
 )
 
-var reCopie = regexp.MustCompile(`^acme-[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$`)
+var (
+	reCopie      = regexp.MustCompile(`^acme-[0-9]{4}-[0-9]{2}-[0-9]{2}\.json$`)
+	reTemporaire = regexp.MustCompile(`^\.acme-[0-9]{4}-[0-9]{2}-[0-9]{2}\.json\..+$`)
+)
+
+// Âge au-delà duquel un fichier temporaire est le reste d'un passage interrompu.
+const orphelin = time.Hour
 
 // sauver écrit la copie du jour de la VM sous <état>/acme/<vm>/, en 0600 dans
 // des dossiers en 0700, puis ne garde que les 7 plus récentes. Un second
@@ -41,8 +47,9 @@ func sauver(state, vm string, now time.Time, b []byte) (string, error) {
 	return path, purger(dir)
 }
 
-// purger retire les copies au-delà des 7 plus récentes. Les fichiers d'un autre
-// nom restent.
+// purger retire les copies au-delà des 7 plus récentes, et les fichiers
+// temporaires d'une écriture interrompue (arrêt brutal entre la création et le
+// renommage), qui portent les mêmes clés. Les fichiers d'un autre nom restent.
 func purger(dir string) error {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -50,8 +57,20 @@ func purger(dir string) error {
 	}
 	var copies []string
 	for _, e := range ents {
-		if e.Type().IsRegular() && reCopie.MatchString(e.Name()) {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if reCopie.MatchString(e.Name()) {
 			copies = append(copies, e.Name())
+			continue
+		}
+		// Un délai laisse en paix l'écriture d'un passage lancé en même temps.
+		if reTemporaire.MatchString(e.Name()) {
+			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > orphelin {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(copies)))

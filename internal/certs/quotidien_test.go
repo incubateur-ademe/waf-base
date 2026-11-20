@@ -280,10 +280,15 @@ func TestQuotidienRefusEtReponse(t *testing.T) {
 
 func TestQuotidienLecteurEnErreur(t *testing.T) {
 	s := nouveauScenario(t)
-	s.lec.err["osc-fr1/waf-pilote"] = errors.New("FGP injoignable")
+	s.lec.err["osc-fr1/waf-pilote"] = errors.New("FGP injoignable\n2026/11/20 wafgen ops: note : fausse ligne\u2028" + strings.Repeat("x", 5000))
 	ecarts, _ := s.lancer(t, appPilot)
-	if !contient(ecarts, "waf-pilote : domaines de waf-pilote (osc-fr1) : FGP injoignable") {
+	if !contient(ecarts, "waf-pilote : domaines de waf-pilote (osc-fr1) : FGP injoignable?2026/11/20") {
 		t.Errorf("écarts %q", ecarts)
+	}
+	for _, e := range ecarts {
+		if strings.ContainsAny(e, "\n\r\u2028") || len([]rune(e)) > maxEcart {
+			t.Errorf("écart sur plusieurs lignes ou trop long : %d runes", len([]rune(e)))
+		}
 	}
 }
 
@@ -356,6 +361,41 @@ func TestRetention(t *testing.T) {
 	}
 	if _, err := sauver(state, "../etc", maintenant, []byte("x")); err == nil {
 		t.Error("nom de VM hors motif accepté")
+	}
+	// Restes d'une écriture interrompue : le vieux part, le récent reste.
+	vieux, recent := filepath.Join(dir, ".acme-2026-11-20.json.123"), filepath.Join(dir, ".acme-2026-11-21.json.456")
+	for _, p := range []string{vieux, recent} {
+		if err := os.WriteFile(p, []byte("cles"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(vieux, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sauver(state, "preprod", maintenant.Add(9*24*time.Hour), []byte("dernier")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(vieux); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("fichier temporaire orphelin gardé : %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("fichier temporaire récent retiré : %v", err)
+	}
+}
+
+func TestPropre(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\nb\r\nc":           "a?b??c",
+		"x\x1b[31my":          "x?[31my",
+		"é\u2028\u2029\u0085": "é???",
+		"tout va bien":        "tout va bien",
+	} {
+		if got := propre(in, 100); got != want {
+			t.Errorf("%q : %q, %q attendu", in, got, want)
+		}
+	}
+	if got := propre(strings.Repeat("é", 20), 10); got != strings.Repeat("é", 9)+"…" {
+		t.Errorf("borne : %q", got)
 	}
 }
 
