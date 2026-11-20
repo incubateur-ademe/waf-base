@@ -254,7 +254,7 @@ func TestControlePlan(t *testing.T) {
 	t.Cleanup(func() { computePlan = provision.Compute })
 	ecarts, notes, inc := ControlePlan(context.Background(), fakeAPI{}, p, "https://c.example.org", "jeton", inv, map[string]bool{"preprod": true})
 	if got.VM != "preprod" || got.ServerUUID != "srv" || got.DestinationUUID != "dst" || got.Environment != "production" || got.BaseRef != provision.DefaultBaseRef ||
-		strings.Join(got.OtherVMs, ",") != "1" || strings.Join(gotApps, ",") != "waf-pilote,brouillon,nouvelle" {
+		strings.Join(got.OtherVMs, ",") != "1" || strings.Join(gotApps, ",") != "waf-pilote,brouillon,nouvelle" || len(got.Inventory) != 4 {
 		t.Fatalf("config : %+v apps : %v", got, gotApps)
 	}
 	if _, ok := gotAPI.(lectureSeule); !ok {
@@ -321,6 +321,9 @@ func TestLectureSeule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := api.UpsertApplicationEnvs(context.Background(), "u", []coolify.EnvWrite{}); !errors.Is(err, errLectureSeule) {
+		t.Fatal(err)
+	}
+	if err := api.CreateTeamEnv(context.Background(), coolify.SharedEnvWrite{Key: "EDGE_SECRET_X"}); !errors.Is(err, errLectureSeule) {
 		t.Fatal(err)
 	}
 }

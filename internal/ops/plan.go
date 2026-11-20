@@ -71,6 +71,9 @@ func (lectureSeule) UpdateApplication(context.Context, string, map[string]any) e
 func (lectureSeule) UpsertApplicationEnvs(context.Context, string, []coolify.EnvWrite) error {
 	return errLectureSeule
 }
+func (lectureSeule) CreateTeamEnv(context.Context, coolify.SharedEnvWrite) error {
+	return errLectureSeule
+}
 
 // ProvisionVM : serveur et destination Coolify d'une VM WAF, et la référence
 // de base de ses apps quand elle diffère de celle de toutes les VM.
@@ -138,6 +141,9 @@ func ControlePlan(ctx context.Context, api provision.API, p Provision, coolifyUR
 			URL: coolifyURL, Token: token, ProjectUUID: p.Project, Environment: p.Environment,
 			ServerUUID: pv.Server, DestinationUUID: pv.Destination, GithubAppUUID: p.GithubApp,
 			VM: vm.Name, BaseRef: pv.BaseRef,
+			// Tout l'inventaire, tous stages : sans lui, la règle Cloudflare d'une
+			// app d'un autre stage dans une zone partagée sortirait « à retirer ».
+			Inventory: inv.Apps,
 		}
 		if cfg.Environment == "" {
 			cfg.Environment = "production"

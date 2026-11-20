@@ -11,6 +11,7 @@ func TestBloquante(t *testing.T) {
 		absente.opsAction("WAF_BASE") + ", puis relancer provision ; sans elle, tout build échoue",
 		vide.opsAction("EDGE_SECRET_X") + ", puis redéployer l'app",
 		fmt.Sprintf("%s : référence orpheline, %s", "WAF_EDGE_SECRET", "wafgen run refuserait de démarrer"),
+		fmt.Sprintf("action ops : retirer de la zone %s la règle %s, qui touche %s hors des règles attendues", "tacct.ademe.fr", "r1", "X-Ademe-Edge"),
 	} {
 		if !Bloquante(n) {
 			t.Fatalf("note bloquante non reconnue : %q", n)
