@@ -44,6 +44,7 @@ type Config struct {
 	PulseURL     string
 	State        string
 	Provision    *Provision
+	Opt          Optionnelles
 }
 
 // StageList rend les stages traités, triés, pour les messages.
@@ -129,6 +130,7 @@ func LoadConfig(getenv func(string) string, mode Mode) (Config, error) {
 			return Config{}, err
 		}
 		c.Provision = p
+		c.Opt = chargerOptionnelles(getenv, c.FGP, c.State)
 	}
 	if c.PulseURL != "" {
 		if u, err := url.Parse(c.PulseURL); err != nil || u.Scheme != "https" || u.Host == "" {

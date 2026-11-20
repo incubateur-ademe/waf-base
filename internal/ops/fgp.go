@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/incubateur-ademe/waf-base/internal/certs"
 )
 
 // Routes que le client accepte d'appeler : lecture seule, pour une app nommée.
@@ -143,6 +145,24 @@ func (c *FGPClient) Domains(ctx context.Context, region, app string) ([]Domain, 
 	}
 	var out struct {
 		Domains *[]Domain `json:"domains"`
+	}
+	if err := c.get(ctx, region, "/v1/apps/"+app+"/domains", &out); err != nil {
+		return nil, err
+	}
+	if out.Domains == nil {
+		return nil, fmt.Errorf("FGP GET /v1/apps/%s/domains : champ domains absent", app)
+	}
+	return *out.Domains, nil
+}
+
+// DomainesTLS lit les domaines de l'app avec leur certificat posé, pour la
+// copie quotidienne des certificats : même route que Domains.
+func (c *FGPClient) DomainesTLS(ctx context.Context, region, app string) ([]certs.Domain, error) {
+	if !reApp.MatchString(app) {
+		return nil, fmt.Errorf("nom d'app Scalingo %q invalide", app)
+	}
+	var out struct {
+		Domains *[]certs.Domain `json:"domains"`
 	}
 	if err := c.get(ctx, region, "/v1/apps/"+app+"/domains", &out); err != nil {
 		return nil, err
