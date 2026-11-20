@@ -24,6 +24,7 @@ func TestRoutes(t *testing.T) {
 		{"POST", "/api/v1/applications/private-github-app"},
 		{"PATCH", "/api/v1/applications/abc123"},
 		{"PATCH", "/api/v1/applications/abc123/envs/bulk"},
+		{"POST", "/api/v1/team/envs"},
 	}
 	for _, r := range ok {
 		if !Allowed(r.m, r.p) {
@@ -37,7 +38,7 @@ func TestRoutes(t *testing.T) {
 		{"GET", "/api/v1/deploy"},
 		{"POST", "/api/v1/applications/abc123/start"},
 		{"PATCH", "/api/v1/team/envs/12"},
-		{"POST", "/api/v1/team/envs"},
+		{"POST", "/api/v1/team/envs/12"},
 		{"DELETE", "/api/v1/team/envs/12"},
 		{"DELETE", "/api/v1/applications/abc123/envs"},
 		{"GET", "/api/v1/applications/../servers"},
@@ -150,13 +151,18 @@ func TestTroncatureSurUneRune(t *testing.T) {
 }
 
 func TestURL(t *testing.T) {
-	for _, u := range []string{"ftp://x", "https://x/api", "https://u:p@x", "x"} {
+	for _, u := range []string{"ftp://x", "https://x/api", "https://u:p@x", "x", "http://ops.example.org", "http://51.15.20.30:8000", "http://localhost:8000"} {
 		if _, err := New(u, "t"); err == nil {
 			t.Errorf("%s acceptée", u)
 		}
 	}
 	if _, err := New("https://ops.example.org/", ""); err == nil {
 		t.Error("jeton vide accepté")
+	}
+	for _, u := range []string{"https://ops.example.org", "http://127.0.0.1:8000", "http://[::1]:8000"} {
+		if _, err := New(u, "t"); err != nil {
+			t.Errorf("%s refusée : %v", u, err)
+		}
 	}
 }
 
@@ -171,5 +177,35 @@ func TestStr(t *testing.T) {
 	}
 	if !e.A.Set || !e.A.Null || !e.B.Set || e.B.Value != "x" || e.C.Set {
 		t.Fatalf("%+v", e)
+	}
+}
+
+func TestCreateTeamEnvSansCorpsDErreur(t *testing.T) {
+	const token = "1|jeton-de-test-tres-secret"
+	const secret = "secret-genere-0123456789abcdefABCDEF_-xyz"
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/team/envs" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"SQLSTATE[23505]: insert into shared_environment_variables (key, value) values (EDGE_SECRET_X, ` + secret + `)"}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.CreateTeamEnv(context.Background(), SharedEnvWrite{Key: "EDGE_SECRET_X", Value: secret, Comment: "c"})
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != 500 {
+		t.Fatalf("erreur : %v", err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "SQLSTATE") {
+		t.Fatalf("corps repris dans l'erreur : %v", err)
+	}
+	if got["key"] != "EDGE_SECRET_X" || got["value"] != secret || got["comment"] != "c" || len(got) != 3 {
+		t.Fatalf("corps envoyé : %v", got)
 	}
 }

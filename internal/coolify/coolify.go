@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,6 +34,7 @@ var routes = []route{
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/github-apps$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/team/envs$`)},
 	{http.MethodGet, regexp.MustCompile(`^/api/v1/servers/` + seg + `/envs$`)},
+	{http.MethodPost, regexp.MustCompile(`^/api/v1/team/envs$`)},
 	{http.MethodPost, regexp.MustCompile(`^/api/v1/applications/private-github-app$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `$`)},
 	{http.MethodPatch, regexp.MustCompile(`^/api/v1/applications/` + seg + `/envs/bulk$`)},
@@ -85,6 +87,10 @@ func New(baseURL, token string) (*Client, error) {
 	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Path != "" {
 		return nil, fmt.Errorf("COOLIFY_URL : http(s)://<hôte>[:port] attendu, sans chemin")
+	}
+	// Le jeton et EDGE_SECRET_<APP> créée par provision ne partent jamais en clair.
+	if ip := net.ParseIP(u.Hostname()); u.Scheme == "http" && (ip == nil || !ip.IsLoopback()) {
+		return nil, fmt.Errorf("COOLIFY_URL : https attendu hors de la boucle locale")
 	}
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("COOLIFY_TOKEN vide")
@@ -295,6 +301,25 @@ func (c *Client) UpsertApplicationEnvs(ctx context.Context, uuid string, envs []
 func (c *Client) ListTeamEnvs(ctx context.Context) ([]SharedEnv, error) {
 	var out []SharedEnv
 	return out, c.do(ctx, http.MethodGet, "/api/v1/team/envs", nil, &out)
+}
+
+// SharedEnvWrite est une variable partagée à créer.
+type SharedEnvWrite struct {
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// CreateTeamEnv crée une variable partagée d'équipe ; Coolify répond 409 si la
+// clé existe. Le corps d'une erreur est omis : une erreur SQL de Coolify peut
+// recopier la valeur envoyée.
+func (c *Client) CreateTeamEnv(ctx context.Context, e SharedEnvWrite) error {
+	err := c.do(ctx, http.MethodPost, "/api/v1/team/envs", e, nil)
+	var he *HTTPError
+	if errors.As(err, &he) {
+		he.Body = "(corps omis)"
+	}
+	return err
 }
 
 func (c *Client) ListServerEnvs(ctx context.Context, uuid string) ([]SharedEnv, error) {
