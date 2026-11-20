@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/incubateur-ademe/waf-base/internal/ops"
 	"github.com/incubateur-ademe/waf-base/internal/provision"
 	"github.com/incubateur-ademe/waf-base/internal/runner"
 )
@@ -22,6 +23,7 @@ const usage = `wafgen <commande> [--etc /etc/waf]
   run        rendu depuis les variables ops, lancement de Caddy, contrôles de démarrage
   rev        empreinte de waf/ (Dockerfile exclu), comme run et l'audit la calculent
   provision  aligne les apps WAF de Coolify sur l'inventaire (plan seul sans --apply)
+  ops        waf-ops : contrôle des 5 minutes et pulse en boucle, ou un passage (ops controle)
 
 Prévus aux étapes suivantes : smoke, status, rules, audit, rollout.`
 
@@ -33,6 +35,18 @@ func main() {
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
+	if cmd == "ops" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := ops.Main(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)
+		stop()
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(2)
+		}
+		if err != nil {
+			log.Fatalf("ops : %v", err)
+		}
+		return
+	}
 	if cmd == "provision" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		err := provision.Main(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr)

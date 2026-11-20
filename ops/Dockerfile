@@ -1,4 +1,4 @@
-# Image du conteneur waf-ops d'outils : wafgen provision, puis audit et rollout.
+# Image du conteneur waf-ops d'outils : boucle des contrôles (wafgen ops), wafgen provision à la demande.
 # Contexte de build : racine du repo, docker build -f ops/Dockerfile .
 FROM golang:1.27-alpine3.24@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523 AS build
 WORKDIR /src
@@ -31,4 +31,4 @@ VOLUME /var/lib/waf-ops
 USER waf-ops
 WORKDIR /var/lib/waf-ops
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["/usr/bin/wafgen", "provision"]
+CMD ["/usr/bin/wafgen", "ops"]
