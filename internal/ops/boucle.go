@@ -270,7 +270,7 @@ func (o *Runner) Passage(ctx context.Context) {
 		tctx, tcancel := context.WithTimeout(ctx, t.Delai)
 		tr, cur, terr := t.Run(tctx, prev.Curseurs)
 		if terr != nil && tctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-			terr = fmt.Errorf("délai de %s dépassé", t.Delai)
+			terr = fmt.Errorf("délai de %s dépassé : %v", t.Delai, terr)
 		}
 		tcancel()
 		if ctx.Err() != nil {

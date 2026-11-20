@@ -48,7 +48,7 @@ func TestControleDNS(t *testing.T) {
 		"cf.example.org":       {"104.16.1.1", "2606:4700::1"},
 		"seul6.example.org":    {},
 	}
-	ecarts, notes := ControleDNS(context.Background(), res, app, []string{ipPP})
+	ecarts, notes, inc := ControleDNS(context.Background(), res, app, []string{ipPP})
 	got := strings.Join(ecarts, "\n")
 	for _, w := range []string{
 		"DNS : v6.example.org résout vers 2001:db8::1, hors de les IP des VM du stage preprod",
@@ -62,19 +62,24 @@ func TestControleDNS(t *testing.T) {
 			t.Fatalf("écart %q absent :\n%s", w, got)
 		}
 	}
-	if strings.Contains(got, "ok.example.org") || len(ecarts) != 6 || len(notes) != 1 {
-		t.Fatalf("écarts : %v notes : %v", ecarts, notes)
+	if strings.Contains(got, "ok.example.org") || len(ecarts) != 6 || len(notes) != 1 || inc != 1 {
+		t.Fatalf("écarts : %v notes : %v incertains : %d", ecarts, notes, inc)
 	}
 
 	app.Edge = "cloudflare"
 	app.Hosts = []string{"cf.example.org", "ok.example.org", "ailleurs.example.org"}
-	ecarts, _ = ControleDNS(context.Background(), res, app, []string{ipPP})
+	ecarts, _, _ = ControleDNS(context.Background(), res, app, []string{ipPP})
 	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "ailleurs.example.org résout vers 80.247.13.145, hors de les IP des VM du stage preprod ou Cloudflare") {
 		t.Fatalf("app edge : %v", ecarts)
 	}
 	res["cf.example.org"] = []string{"::ffff:104.16.1.1"}
-	if ecarts, _ = ControleDNS(context.Background(), res, inventory.App{Hosts: []string{"cf.example.org"}, Edge: "cloudflare"}, nil); len(ecarts) != 0 {
+	if ecarts, _, _ = ControleDNS(context.Background(), res, inventory.App{Hosts: []string{"cf.example.org"}, Edge: "cloudflare"}, nil); len(ecarts) != 0 {
 		t.Fatalf("IPv4 mappée : %v", ecarts)
+	}
+	res["cdn.example.org"] = []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5"}
+	ecarts, _, _ = ControleDNS(context.Background(), res, inventory.App{Stage: "preprod", Hosts: []string{"cdn.example.org"}}, []string{ipPP})
+	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "192.0.2.1 192.0.2.2 192.0.2.3 et 2 autre(s)") {
+		t.Fatalf("liste d'IP non bornée : %v", ecarts)
 	}
 }
 
@@ -163,7 +168,7 @@ func TestControleCertificats(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}}
 	app := inventory.App{Hosts: []string{"ok.example.org", "bientot.example.org", "inconnu.example.org", "autre-nom.example.org"}}
-	ecarts, _ := ControleCertificats(context.Background(), c, app, []string{ipPP}, now)
+	ecarts, _, inc := ControleCertificats(context.Background(), c, app, []string{ipPP}, now)
 	got := strings.Join(ecarts, "\n")
 	for _, w := range []string{
 		"certificat de bientot.example.org sur " + ipPP + " : expire le",
@@ -174,15 +179,36 @@ func TestControleCertificats(t *testing.T) {
 			t.Fatalf("écart %q absent :\n%s", w, got)
 		}
 	}
-	if len(ecarts) != 3 || dials[0] != ipPP+":443" {
-		t.Fatalf("écarts : %v connexions : %v", ecarts, dials)
+	if len(ecarts) != 3 || dials[0] != ipPP+":443" || inc != 0 {
+		t.Fatalf("écarts : %v connexions : %v incertains : %d", ecarts, dials, inc)
 	}
 
 	// Sans réglage de test, les racines du système : l'autorité de test est refusée.
 	c.Roots = nil
-	ecarts, _ = ControleCertificats(context.Background(), c, inventory.App{Hosts: []string{"ok.example.org"}}, []string{ipPP}, now)
+	ecarts, _, _ = ControleCertificats(context.Background(), c, inventory.App{Hosts: []string{"ok.example.org"}}, []string{ipPP}, now)
 	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "certificat refusé") {
 		t.Fatalf("autorité de test acceptée sans réglage : %v", ecarts)
+	}
+
+	// Certificat expiré : la cause est dite.
+	addr2 := tlsServer(t, map[string]tls.Certificate{"*": p.leafNoms(t, now.Add(-24*time.Hour), "vieux.example.org")})
+	c2 := TLSServi{Roots: p.roots, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr2)
+	}}
+	ecarts, _, _ = ControleCertificats(context.Background(), c2, inventory.App{Hosts: []string{"vieux.example.org"}}, []string{ipPP}, now)
+	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "certificat expiré le") {
+		t.Fatalf("certificat expiré : %v", ecarts)
+	}
+
+	// VM injoignable : un seul écart, aucun autre host tenté.
+	n := 0
+	c3 := TLSServi{Dial: func(context.Context, string, string) (net.Conn, error) {
+		n++
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	}}
+	ecarts, _, inc = ControleCertificats(context.Background(), c3, inventory.App{Hosts: []string{"a.example.org", "b.example.org", "c.example.org"}}, []string{ipPP}, now)
+	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "VM "+ipPP+" injoignable en 443 (connexion en échec), 3 host(s) non contrôlés") || n != 1 || inc != 1 {
+		t.Fatalf("VM injoignable : %v, %d connexion(s), %d incertain(s)", ecarts, n, inc)
 	}
 }
 
@@ -226,7 +252,7 @@ func TestControlePlan(t *testing.T) {
 		}}, nil
 	}
 	t.Cleanup(func() { computePlan = provision.Compute })
-	ecarts, notes := ControlePlan(context.Background(), fakeAPI{}, p, "https://c.example.org", "jeton", inv, map[string]bool{"preprod": true})
+	ecarts, notes, inc := ControlePlan(context.Background(), fakeAPI{}, p, "https://c.example.org", "jeton", inv, map[string]bool{"preprod": true})
 	if got.VM != "preprod" || got.ServerUUID != "srv" || got.DestinationUUID != "dst" || got.Environment != "production" || got.BaseRef != provision.DefaultBaseRef ||
 		strings.Join(got.OtherVMs, ",") != "1" || strings.Join(gotApps, ",") != "waf-pilote,brouillon,nouvelle" {
 		t.Fatalf("config : %+v apps : %v", got, gotApps)
@@ -235,27 +261,54 @@ func TestControlePlan(t *testing.T) {
 		t.Fatalf("API passée sans garde de lecture seule : %T", gotAPI)
 	}
 	all := strings.Join(append(ecarts, notes...), "\n")
-	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "waf-waf-pilote-preprod diffère de l'inventaire (health_check_enabled, env UPSTREAM)") ||
-		!strings.Contains(ecarts[1], "waf-nouvelle-preprod à créer alors que l'app est en service") || strings.Contains(all, "secret-") {
+	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "waf-waf-pilote-preprod à aligner sur le plan de la VM preprod (health_check_enabled, env UPSTREAM)") ||
+		!strings.Contains(ecarts[1], "waf-nouvelle-preprod à créer alors que l'app est en service") || strings.Contains(all, "secret-") || inc != 0 {
 		t.Fatalf("écarts : %v", ecarts)
 	}
-	if !strings.Contains(all, "waf-brouillon-preprod à créer, app pas encore en service") || !strings.Contains(all, "VM preprod : 2 note(s) de plan") || strings.Contains(all, "secret-origine") {
+	if !strings.Contains(all, "waf-brouillon-preprod à créer, app pas encore en service") || !strings.Contains(all, "VM preprod : 1 note(s) de plan") ||
+		!strings.Contains(all, "waf-waf-pilote-preprod : 1 note(s) de plan") || strings.Contains(all, "secret-origine") {
 		t.Fatalf("notes : %v", notes)
 	}
+
+	// base_ref par VM, repli sur le global.
+	p.BaseRef = "{{team.WAF_BASE}}"
+	p.VMs["preprod"] = ProvisionVM{Server: "srv", Destination: "dst", BaseRef: "{{server.WAF_BASE}}"}
+	p.VMs["1"] = ProvisionVM{Server: "s1", Destination: "d1"}
+	refs := map[string]string{}
+	computePlan = func(_ context.Context, _ provision.API, cfg provision.Config, _ []inventory.App) (*provision.Plan, error) {
+		refs[cfg.VM] = cfg.BaseRef
+		return &provision.Plan{}, nil
+	}
+	ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true, "prod": true})
+	if refs["preprod"] != "{{server.WAF_BASE}}" || refs["1"] != "{{team.WAF_BASE}}" {
+		t.Fatalf("base_ref : %v", refs)
+	}
+
+	// Action ops en attente : un écart, sans le texte de la note.
+	computePlan = func(_ context.Context, _ provision.API, _ provision.Config, apps []inventory.App) (*provision.Plan, error) {
+		return &provision.Plan{Notes: []string{"action ops : créer WAF_BASE avec sa valeur dans l'UI Coolify (x), puis relancer provision"},
+			Apps: []provision.AppPlan{{App: apps[0], Name: "waf-waf-pilote-preprod", Notes: []string{"WAF_EDGE_SECRET : référence orpheline, wafgen run refuserait de démarrer"}}}}, nil
+	}
+	ecarts, _, _ = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true})
+	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "VM preprod : 1 action(s) ops en attente") || !strings.Contains(ecarts[1], "waf-waf-pilote-preprod : 1 action(s) ops en attente") ||
+		strings.Contains(strings.Join(ecarts, ""), "WAF_EDGE_SECRET") {
+		t.Fatalf("actions ops : %v", ecarts)
+	}
+	delete(p.VMs, "1")
 
 	computePlan = func(context.Context, provision.API, provision.Config, []inventory.App) (*provision.Plan, error) {
 		return nil, fmt.Errorf("waf-x : %w", &coolify.HTTPError{Method: "GET", Path: "/api/v1/applications/u/envs", Status: 500, Body: `{"value":"secret-dans-le-corps"}`})
 	}
-	_, notes = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true})
-	if len(notes) != 1 || notes[0] != "provision : VM preprod : Coolify GET /api/v1/applications/u/envs : HTTP 500" {
-		t.Fatalf("corps d'erreur Coolify : %v", notes)
+	ecarts, _, inc = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true})
+	if len(ecarts) != 1 || ecarts[0] != "provision : plan de la VM preprod impossible : Coolify GET /api/v1/applications/u/envs : HTTP 500" || inc != 1 {
+		t.Fatalf("corps d'erreur Coolify : %v %d", ecarts, inc)
 	}
 	computePlan = func(context.Context, provision.API, provision.Config, []inventory.App) (*provision.Plan, error) {
 		return nil, errors.New("destination dst sur le réseau coolify")
 	}
-	ecarts, notes = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true, "prod": true})
-	if len(ecarts) != 2 || ecarts[0] != "provision : VM 1 absente de WAF_OPS_PROVISION" || ecarts[1] != "provision : plan de la VM preprod impossible" || !strings.Contains(strings.Join(notes, ""), "réseau coolify") {
-		t.Fatalf("erreurs : %v %v", ecarts, notes)
+	ecarts, _, inc = ControlePlan(context.Background(), fakeAPI{}, p, "u", "t", inv, map[string]bool{"preprod": true, "prod": true})
+	if len(ecarts) != 2 || ecarts[0] != "provision : VM 1 absente de WAF_OPS_PROVISION" || ecarts[1] != "provision : plan de la VM preprod impossible : destination dst sur le réseau coolify" || inc != 0 {
+		t.Fatalf("erreurs : %v %d", ecarts, inc)
 	}
 }
 

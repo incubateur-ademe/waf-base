@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
+	"github.com/incubateur-ademe/waf-base/internal/inventory"
+	"github.com/incubateur-ademe/waf-base/internal/provision"
 )
 
 const secretValue = "valeur-de-variable-qui-ne-doit-jamais-sortir"
@@ -137,13 +140,14 @@ func TestClasser(t *testing.T) {
 }
 
 type fakeOrigine struct {
-	ecarts []string
-	calls  []string
+	ecarts     []string
+	incertains int
+	calls      []string
 }
 
-func (f *fakeOrigine) Sonder(_ context.Context, app, region string, hosts []string) ([]string, []string) {
+func (f *fakeOrigine) Sonder(_ context.Context, app, region string, hosts []string) ([]string, []string, int) {
 	f.calls = append(f.calls, app+" "+region+" "+strings.Join(hosts, ","))
-	return f.ecarts, nil
+	return f.ecarts, nil, f.incertains
 }
 
 func TestAudit(t *testing.T) {
@@ -231,7 +235,9 @@ func sondeServer(t *testing.T, h http.HandlerFunc) (Sonde, *[]string) {
 func sondeServerCerts(t *testing.T, h http.HandlerFunc, p pki, cert func(*tls.ClientHelloInfo) tls.Certificate) (Sonde, *[]string) {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(h)
-	srv.TLS = &tls.Config{GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	// Sans SNI, Go sert Certificates[0] sans appeler GetCertificate : le
+	// certificat choisi pour un SNI vide doit y être, pas celui d'httptest.
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert(&tls.ClientHelloInfo{})}, GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		c := cert(hi)
 		return &c, nil
 	}}
@@ -261,7 +267,7 @@ func TestSonde(t *testing.T) {
 		w.WriteHeader(403)
 		fmt.Fprint(w, pageRefus)
 	})
-	ecarts, notes := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+	ecarts, notes, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
 	if len(ecarts) != 0 || len(notes) != 0 {
 		t.Fatalf("%v %v", ecarts, notes)
 	}
@@ -295,7 +301,7 @@ func TestSonde(t *testing.T) {
 	}
 	for _, c := range cases {
 		s, _ := sondeServer(t, c.h)
-		ecarts, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+		ecarts, _, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
 		if len(ecarts) != 3 || !strings.Contains(ecarts[0], c.msg) || !strings.Contains(ecarts[2], "host waf-pilote.incubateur.ademe.dev envoyé au routeur 192.0.2.10") {
 			t.Fatalf("%s : %v", c.nom, ecarts)
 		}
@@ -306,21 +312,21 @@ func TestSonde(t *testing.T) {
 		w.WriteHeader(403)
 		fmt.Fprint(w, pageRefus)
 	})
-	ecarts, _ = s.Sonder(context.Background(), "autre", "osc-fr1", []string{"x.example.org"})
+	ecarts, _, _ = s.Sonder(context.Background(), "autre", "osc-fr1", []string{"x.example.org"})
 	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "IP du routeur de autre.osc-fr1.scalingo.io introuvable") {
 		t.Fatalf("routeur introuvable : %v", ecarts)
 	}
 
 	// Sans réglage de test, le certificat de *.scalingo.io est vérifié ; à
 	// l'IP du routeur, seule la signature du 403 compte.
-	if c := (Sonde{}).client(""); c.Transport.(*http.Transport).TLSClientConfig != nil {
+	if c := (Sonde{}).client("", ""); c.Transport.(*http.Transport).TLSClientConfig != nil {
 		t.Fatal("la sonde de production ne vérifie pas le certificat")
 	}
-	if c := (Sonde{}).client("192.0.2.10"); c.Transport.(*http.Transport).TLSClientConfig.VerifyConnection == nil {
+	if c := (Sonde{}).client("192.0.2.10", "waf-pilote.osc-fr1.scalingo.io"); c.Transport.(*http.Transport).TLSClientConfig.VerifyConnection == nil {
 		t.Fatal("sonde à l'IP du routeur sans vérification de la chaîne")
 	}
 	s.TLS = nil
-	ecarts, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+	ecarts, _, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
 	if len(ecarts) != 3 || !strings.Contains(ecarts[0], "certificat refusé") || !strings.Contains(ecarts[2], "certificat refusé") {
 		t.Fatalf("autorité de test acceptée sans réglage : %v", ecarts)
 	}
@@ -426,7 +432,7 @@ func TestRunnerTaches(t *testing.T) {
 	}
 	o.Taches = []Tache{tache}
 	o.Passage(context.Background())
-	if last := p.bodies[len(p.bodies)-1]; last != "waf-ops-ko: audit en échec : délai de 10ms dépassé" {
+	if last := p.bodies[len(p.bodies)-1]; last != "waf-ops-ko: audit en échec : délai de 10ms dépassé : context deadline exceeded" {
 		t.Fatalf("délai : %q", last)
 	}
 }
@@ -529,9 +535,9 @@ func TestAuditTronque(t *testing.T) {
 
 type coupeOrigine struct{ cancel func() }
 
-func (c coupeOrigine) Sonder(context.Context, string, string, []string) ([]string, []string) {
+func (c coupeOrigine) Sonder(context.Context, string, string, []string) ([]string, []string, int) {
 	c.cancel()
-	return []string{"origine : sans réponse : délai dépassé"}, nil
+	return []string{"origine : sans réponse : délai dépassé"}, nil, 1
 }
 
 func TestAuditCoupe(t *testing.T) {
@@ -656,9 +662,97 @@ func TestSondeRouteurCertificat(t *testing.T) {
 			}
 			return valide
 		})
-		ecarts, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+		ecarts, _, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
 		if len(ecarts) != c.ecarts || (c.ecarts == 1 && !strings.Contains(ecarts[0], "envoyé au routeur 192.0.2.10 : sans réponse : certificat refusé")) {
 			t.Fatalf("%s : %v", c.nom, ecarts)
 		}
 	}
+}
+
+func TestSondeHostIPEtOrigine(t *testing.T) {
+	refus := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(403)
+		fmt.Fprint(w, pageRefus)
+	}
+	p := newPKI(t)
+	origine := p.leafNoms(t, time.Now().Add(60*24*time.Hour), "waf-pilote.osc-fr1.scalingo.io")
+	s, _ := sondeServerCerts(t, refus, p, func(*tls.ClientHelloInfo) tls.Certificate { return origine })
+	ecarts, _, _ := s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+	if len(ecarts) != 0 {
+		t.Fatalf("certificat de l'origine refusé à l'IP du routeur : %v", ecarts)
+	}
+	tiers := p.leafNoms(t, time.Now().Add(60*24*time.Hour), "attaquant.example.org")
+	s, _ = sondeServerCerts(t, refus, p, func(hi *tls.ClientHelloInfo) tls.Certificate {
+		if hi.ServerName == "" {
+			return tiers
+		}
+		return origine
+	})
+	ecarts, _, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"10.9.8.7"})
+	if len(ecarts) != 1 || !strings.Contains(ecarts[0], "host 10.9.8.7 envoyé au routeur 192.0.2.10 : sans réponse : certificat refusé") {
+		t.Fatalf("host en IP littérale accepté sans nom vérifié : %v", ecarts)
+	}
+}
+
+type fakeCerts struct {
+	calls []string
+	err   error
+}
+
+func (f *fakeCerts) Feuille(_ context.Context, ip, host string) (*x509.Certificate, error) {
+	f.calls = append(f.calls, ip+" "+host)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &x509.Certificate{NotAfter: time.Now().Add(60 * 24 * time.Hour)}, nil
+}
+
+func TestAuditBranchement(t *testing.T) {
+	cfg := testCfg(t)
+	d, _ := pilotDeps(t, ipPP+"/32")
+	d.Origine = &fakeOrigine{}
+	res := fakeResolver{"waf-pilote.incubateur.ademe.dev": {ipPP}, "koyo.example.org": {"192.0.2.9"}}
+	certs := &fakeCerts{}
+	d.DNS, d.Certs = res, certs
+	r, _, err := Audit(context.Background(), cfg, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(certs.calls, ";") != ipPP+" koyo.example.org;"+ipPP+" waf-pilote.incubateur.ademe.dev" {
+		t.Fatalf("certificats : %v (brouillon, pas en service, et tacct, en prod, hors champ)", certs.calls)
+	}
+	if len(r.Ecarts) != 1 || !strings.Contains(r.Ecarts[0], "koyo : DNS : koyo.example.org résout vers 192.0.2.9") ||
+		!strings.Contains(strings.Join(r.Notes, "\n"), "WAF_OPS_PROVISION absente") {
+		t.Fatalf("rapport : %v %v", r.Ecarts, r.Notes)
+	}
+
+	// Plan branché, et contrôle sans réponse : écarts gardés, audit en échec.
+	cfg.Provision = &Provision{Project: "p", GithubApp: "g", VMs: map[string]ProvisionVM{"preprod": {Server: "s", Destination: "d"}}}
+	d.Provision = fakeAPI{}
+	computePlan = func(context.Context, provision.API, provision.Config, []inventory.App) (*provision.Plan, error) {
+		return nil, &coolify.HTTPError{Method: "GET", Path: "/api/v1/applications", Status: 502}
+	}
+	t.Cleanup(func() { computePlan = provision.Compute })
+	r, _, err = Audit(context.Background(), cfg, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "1 contrôle(s) sans réponse, audit relancé dans 15m0s") ||
+		!strings.Contains(strings.Join(r.Ecarts, "\n"), "provision : plan de la VM preprod impossible : Coolify GET /api/v1/applications : HTTP 502") {
+		t.Fatalf("plan : %v %v", r.Ecarts, err)
+	}
+
+	// Coupure pendant les DNS : l'app en cours est nommée, ses écarts écartés.
+	ctx, cancel := context.WithCancel(context.Background())
+	d.DNS = coupeResolver{cancel: cancel}
+	r, _, err = Audit(ctx, cfg, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "audit coupé pendant les DNS et certificats de koyo") ||
+		strings.Contains(strings.Join(r.Ecarts, ""), "DNS") || !strings.Contains(strings.Join(r.Notes, "\n"), "koyo : audit coupé pendant ses DNS et certificats") {
+		t.Fatalf("coupure : %v %v %v", r.Ecarts, r.Notes, err)
+	}
+}
+
+type coupeResolver struct{ cancel func() }
+
+func (c coupeResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	c.cancel()
+	return nil, &net.DNSError{Err: "timeout", IsTimeout: true}
 }

@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/incubateur-ademe/waf-base/internal/inventory"
 	"github.com/incubateur-ademe/waf-base/internal/render"
@@ -37,11 +38,18 @@ type Resolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
+const (
+	dnsTimeout = 10 * time.Second
+	// Adresses citées au plus par host : le reste vient du DNS de la startup
+	// et remplirait le pulse.
+	maxIPsCitees = 3
+)
+
 // ControleDNS : chaque host de l'app résout vers les IP des VM de son stage.
 // Une app en edge: cloudflare peut aussi résoudre vers les plages de
 // Cloudflare. Toute autre adresse, IPv6 comprise, envoie des visiteurs hors
-// du WAF.
-func ControleDNS(ctx context.Context, res Resolver, a inventory.App, vmIPs []string) (ecarts, notes []string) {
+// du WAF. incertains compte les résolutions restées sans réponse.
+func ControleDNS(ctx context.Context, res Resolver, a inventory.App, vmIPs []string) (ecarts, notes []string, incertains int) {
 	vms := map[netip.Addr]bool{}
 	for _, s := range vmIPs {
 		if ip, err := netip.ParseAddr(s); err == nil {
@@ -50,7 +58,9 @@ func ControleDNS(ctx context.Context, res Resolver, a inventory.App, vmIPs []str
 	}
 	edge := a.Edge == render.EdgeCloudflare
 	for _, h := range a.Hosts {
-		addrs, err := res.LookupIPAddr(ctx, h)
+		lctx, cancel := context.WithTimeout(ctx, dnsTimeout)
+		addrs, err := res.LookupIPAddr(lctx, h)
+		cancel()
 		if err != nil {
 			var de *net.DNSError
 			if errors.As(err, &de) && de.IsNotFound {
@@ -58,6 +68,7 @@ func ControleDNS(ctx context.Context, res Resolver, a inventory.App, vmIPs []str
 			} else {
 				ecarts = append(ecarts, fmt.Sprintf("DNS : résolution de %s en échec", h))
 				notes = append(notes, fmt.Sprintf("DNS : %s : %v", h, err))
+				incertains++
 			}
 			continue
 		}
@@ -84,12 +95,16 @@ func ControleDNS(ctx context.Context, res Resolver, a inventory.App, vmIPs []str
 			if edge {
 				attendu += " ou Cloudflare"
 			}
-			ecarts = append(ecarts, fmt.Sprintf("DNS : %s résout vers %s, hors de %s", h, strings.Join(hors, " "), attendu))
+			cite := hors
+			if len(cite) > maxIPsCitees {
+				cite = append(append([]string{}, hors[:maxIPsCitees]...), fmt.Sprintf("et %d autre(s)", len(hors)-maxIPsCitees))
+			}
+			ecarts = append(ecarts, fmt.Sprintf("DNS : %s résout vers %s, hors de %s", h, strings.Join(cite, " "), attendu))
 		case !v4:
 			ecarts = append(ecarts, fmt.Sprintf("DNS : %s sans adresse IPv4", h))
 		}
 	}
-	return ecarts, notes
+	return ecarts, notes, incertains
 }
 
 func inRanges(ip netip.Addr, ranges []netip.Prefix) bool {

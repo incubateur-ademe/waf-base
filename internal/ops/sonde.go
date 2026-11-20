@@ -31,7 +31,7 @@ var reAccessDenied = regexp.MustCompile(`<title>\s*Access denied - Scalingo\s*</
 // Origine sonde l'origine d'une app verrouillée depuis outils, dont l'IP n'est
 // dans aucune règle : chaque appel doit recevoir le 403 du firewall.
 type Origine interface {
-	Sonder(ctx context.Context, app, region string, hosts []string) (ecarts, notes []string)
+	Sonder(ctx context.Context, app, region string, hosts []string) (ecarts, notes []string, incertains int)
 }
 
 // Sonde fait les trois appels de la section 3.5 du design : la racine de
@@ -43,7 +43,9 @@ type Sonde struct {
 	TLS     *tls.Config
 }
 
-func (s Sonde) client(routeur string) *http.Client {
+// client : routeur et origine ne servent qu'à l'appel du host à l'IP du
+// routeur, où le certificat de l'origine est admis aussi.
+func (s Sonde) client(routeur, origine string) *http.Client {
 	d := s.Dial
 	if d == nil {
 		d = (&net.Dialer{Timeout: sondeTimeout}).DialContext
@@ -68,7 +70,7 @@ func (s Sonde) client(routeur string) *http.Client {
 		}
 		roots := tc.RootCAs
 		tc.InsecureSkipVerify = true
-		tc.VerifyConnection = func(cs tls.ConnectionState) error { return sansEcheance(cs, roots) }
+		tc.VerifyConnection = func(cs tls.ConnectionState) error { return sansEcheance(cs, roots, origine) }
 	}
 	return &http.Client{
 		Timeout: sondeTimeout,
@@ -83,10 +85,16 @@ func (s Sonde) client(routeur string) *http.Client {
 }
 
 // sansEcheance vérifie la chaîne et le nom du certificat à une date prise au
-// milieu de sa période de validité : seule son échéance est ignorée.
-func sansEcheance(cs tls.ConnectionState, roots *x509.CertPool) error {
+// milieu de sa période de validité : seule son échéance est ignorée. Le nom
+// admis est le host, ou l'origine <app>.<région>.scalingo.io : sans certificat
+// pour le host, le routeur présente celui de l'origine, qu'un tiers ne peut pas
+// présenter non plus. Un host en IP littérale n'a pas de nom vérifiable.
+func sansEcheance(cs tls.ConnectionState, roots *x509.CertPool, origine string) error {
 	if len(cs.PeerCertificates) == 0 {
 		return errors.New("aucun certificat présenté")
+	}
+	if cs.ServerName == "" {
+		return &tls.CertificateVerificationError{UnverifiedCertificates: cs.PeerCertificates, Err: errors.New("host sans nom vérifiable")}
 	}
 	leaf := cs.PeerCertificates[0]
 	inter := x509.NewCertPool()
@@ -94,7 +102,13 @@ func sansEcheance(cs tls.ConnectionState, roots *x509.CertPool) error {
 		inter.AddCert(c)
 	}
 	milieu := leaf.NotBefore.Add(leaf.NotAfter.Sub(leaf.NotBefore) / 2)
-	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Roots: roots, Intermediates: inter, CurrentTime: milieu}); err != nil {
+	_, err := leaf.Verify(x509.VerifyOptions{DNSName: cs.ServerName, Roots: roots, Intermediates: inter, CurrentTime: milieu})
+	if err != nil && origine != "" {
+		if _, e2 := leaf.Verify(x509.VerifyOptions{DNSName: origine, Roots: roots, Intermediates: inter, CurrentTime: milieu}); e2 == nil {
+			return nil
+		}
+	}
+	if err != nil {
 		return &tls.CertificateVerificationError{UnverifiedCertificates: cs.PeerCertificates, Err: err}
 	}
 	return nil
@@ -123,46 +137,55 @@ func cheminAleatoire() string {
 	return "/sonde-waf-ops-" + hex.EncodeToString(b)
 }
 
-func (s Sonde) Sonder(ctx context.Context, app, region string, hosts []string) (ecarts, notes []string) {
+func (s Sonde) Sonder(ctx context.Context, app, region string, hosts []string) (ecarts, notes []string, incertains int) {
 	origin := app + "." + region + ".scalingo.io"
 	base := "https://" + origin
-	c := s.client("")
-	if msg := sonder(ctx, c, http.MethodGet, base+"/"); msg != "" {
-		ecarts = append(ecarts, fmt.Sprintf("origine %s/ : %s", base, msg))
+	c := s.client("", "")
+	appel := func(cl *http.Client, method, u, quoi string) {
+		msg, inc, detail := sonder(ctx, cl, method, u)
+		if msg == "" {
+			return
+		}
+		ecarts = append(ecarts, quoi+" : "+msg)
+		if detail != "" {
+			notes = append(notes, quoi+" : "+detail)
+		}
+		if inc {
+			incertains++
+		}
 	}
-	if msg := sonder(ctx, c, http.MethodPost, base+cheminAleatoire()); msg != "" {
-		ecarts = append(ecarts, fmt.Sprintf("origine %s, POST sur un chemin aléatoire : %s", base, msg))
-	}
+	appel(c, http.MethodGet, base+"/", "origine "+base+"/")
+	appel(c, http.MethodPost, base+cheminAleatoire(), "origine "+base+", POST sur un chemin aléatoire")
 	if len(hosts) == 0 {
-		return ecarts, notes
+		return ecarts, notes, incertains
 	}
 	ips, err := s.resolve(ctx, origin)
 	if err != nil || len(ips) == 0 {
 		ecarts = append(ecarts, fmt.Sprintf("IP du routeur de %s introuvable, hosts non sondés", origin))
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("résolution de %s : %v", origin, err))
+			incertains++
 		}
-		return ecarts, notes
+		return ecarts, notes, incertains
 	}
-	cr := s.client(ips[0])
+	cr := s.client(ips[0], origin)
 	for i, h := range hosts {
 		if i == maxSondeHosts {
 			notes = append(notes, fmt.Sprintf("%d host(s) au-delà de %d non sondés à l'IP du routeur", len(hosts)-maxSondeHosts, maxSondeHosts))
 			break
 		}
-		if msg := sonder(ctx, cr, http.MethodGet, "https://"+h+"/"); msg != "" {
-			ecarts = append(ecarts, fmt.Sprintf("host %s envoyé au routeur %s : %s", h, ips[0], msg))
-		}
+		appel(cr, http.MethodGet, "https://"+h+"/", fmt.Sprintf("host %s envoyé au routeur %s", h, ips[0]))
 	}
-	return ecarts, notes
+	return ecarts, notes, incertains
 }
 
 // sonder rend "" si la réponse est le refus du firewall, sinon ce qui a été
-// reçu. Ni corps ni en-tête n'entrent dans le message.
-func sonder(ctx context.Context, c *http.Client, method, u string) string {
+// reçu ; incertain si rien n'a été reçu, detail pour les logs. Ni corps ni
+// en-tête n'entrent dans le message.
+func sonder(ctx context.Context, c *http.Client, method, u string) (msg string, incertain bool, detail string) {
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
-		return "requête invalide"
+		return "requête invalide", false, ""
 	}
 	req.Header.Set("User-Agent", "waf-ops-sonde")
 	resp, err := c.Do(req)
@@ -171,22 +194,23 @@ func sonder(ctx context.Context, c *http.Client, method, u string) string {
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
+		detail = propre(err.Error(), 300)
 		var ce *tls.CertificateVerificationError
 		if errors.As(err, &ce) {
-			return "sans réponse : certificat refusé"
+			return "sans réponse : certificat refusé", false, detail
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return "sans réponse : délai dépassé"
+			return "sans réponse : délai dépassé", true, detail
 		}
-		return "sans réponse : " + propre(err.Error(), maxDetail)
+		return "sans réponse : " + propre(err.Error(), maxDetail), true, detail
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxSondeBody))
 	if resp.StatusCode != http.StatusForbidden {
-		return fmt.Sprintf("HTTP %d au lieu du 403 du firewall", resp.StatusCode)
+		return fmt.Sprintf("HTTP %d au lieu du 403 du firewall", resp.StatusCode), false, ""
 	}
 	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") || !reAccessDenied.Match(body) {
-		return "403 sans la page du routeur Scalingo (SCALINGO_FORBIDDEN_PAGE_URL ?)"
+		return "403 sans la page du routeur Scalingo (SCALINGO_FORBIDDEN_PAGE_URL ?)", false, ""
 	}
-	return ""
+	return "", false, ""
 }

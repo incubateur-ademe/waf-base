@@ -58,17 +58,28 @@ func (t TLSServi) Feuille(ctx context.Context, ip, host string) (*x509.Certifica
 
 // ControleCertificats : sur chaque VM du stage de l'app, le certificat
 // présenté pour chaque host est valide pour lui et n'expire pas avant 21 jours.
-func ControleCertificats(ctx context.Context, c Certificats, a inventory.App, vmIPs []string, now time.Time) (ecarts, notes []string) {
-	for i, h := range a.Hosts {
-		if i == maxTLSHosts {
-			notes = append(notes, fmt.Sprintf("certificats : %d host(s) au-delà de %d non contrôlés", len(a.Hosts)-maxTLSHosts, maxTLSHosts))
-			break
-		}
-		for _, ip := range vmIPs {
+// Une VM qui ne répond pas au premier host est injoignable : ses autres hosts
+// ne sont pas tentés. incertains compte les contrôles restés sans réponse.
+func ControleCertificats(ctx context.Context, c Certificats, a inventory.App, vmIPs []string, now time.Time) (ecarts, notes []string, incertains int) {
+	hosts := a.Hosts
+	if len(hosts) > maxTLSHosts {
+		notes = append(notes, fmt.Sprintf("certificats : %d host(s) au-delà de %d non contrôlés", len(hosts)-maxTLSHosts, maxTLSHosts))
+		hosts = hosts[:maxTLSHosts]
+	}
+	for _, ip := range vmIPs {
+		for i, h := range hosts {
 			leaf, err := c.Feuille(ctx, ip, h)
 			if err != nil {
-				ecarts = append(ecarts, fmt.Sprintf("certificat de %s sur %s : %s", h, ip, tlsProbleme(err)))
+				msg, reseau := tlsProbleme(err)
 				notes = append(notes, fmt.Sprintf("certificat de %s sur %s : %v", h, ip, err))
+				if reseau {
+					incertains++
+				}
+				if reseau && i == 0 {
+					ecarts = append(ecarts, fmt.Sprintf("certificats : VM %s injoignable en 443 (%s), %d host(s) non contrôlés", ip, msg, len(hosts)))
+					break
+				}
+				ecarts = append(ecarts, fmt.Sprintf("certificat de %s sur %s : %s", h, ip, msg))
 				continue
 			}
 			if reste := leaf.NotAfter.Sub(now); reste < certMarge {
@@ -76,19 +87,27 @@ func ControleCertificats(ctx context.Context, c Certificats, a inventory.App, vm
 			}
 		}
 	}
-	return ecarts, notes
+	return ecarts, notes, incertains
 }
 
-func tlsProbleme(err error) string {
-	var ce *tls.CertificateVerificationError
+// tlsProbleme : la cause en clair, et si elle tient au réseau plutôt qu'au
+// certificat.
+func tlsProbleme(err error) (msg string, reseau bool) {
 	var he x509.HostnameError
+	var ie x509.CertificateInvalidError
+	var ce *tls.CertificateVerificationError
+	var ne net.Error
 	switch {
 	case errors.As(err, &he):
-		return "certificat pour un autre nom"
+		return "certificat pour un autre nom", false
+	case errors.As(err, &ie) && ie.Reason == x509.Expired && ie.Cert != nil:
+		return "certificat expiré le " + ie.Cert.NotAfter.UTC().Format(time.DateOnly), false
 	case errors.As(err, &ce):
-		return "certificat refusé"
+		return "certificat refusé", false
 	case errors.Is(err, context.DeadlineExceeded):
-		return "délai dépassé"
+		return "délai dépassé", true
+	case errors.As(err, &ne):
+		return "connexion en échec", true
 	}
-	return "connexion TLS en échec"
+	return "poignée de main TLS en échec", false
 }

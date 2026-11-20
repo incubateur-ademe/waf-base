@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,6 +38,7 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 		return r, curseurs, err
 	}
 	next := map[string]time.Time{}
+	incertains := 0
 	// Une cible illisible ce passage cache peut-être une app déjà suivie : ses
 	// curseurs restent, quel que soit leur âge.
 	garder := false
@@ -56,7 +58,7 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 		}
 		key := region + "/" + app
 		avant, suivi := curseurs[key]
-		auditApp(ctx, d, a, app, region, team, avant, suivi, now, next, &r)
+		incertains += auditApp(ctx, d, a, app, region, team, avant, suivi, now, next, &r)
 		if ctx.Err() != nil {
 			// Les écarts d'une app coupée en cours viennent du délai, pas d'elle.
 			r.Ecarts, r.Notes = r.Ecarts[:nE], r.Notes[:nN]
@@ -74,17 +76,22 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 			continue
 		}
 		var x Rapport
+		n := 0
 		if d.DNS != nil {
-			ecarts, notes := ControleDNS(ctx, d.DNS, a, ips[a.Stage])
+			ecarts, notes, inc := ControleDNS(ctx, d.DNS, a, ips[a.Stage])
 			x.ajout(a.Name, ecarts, notes)
+			n += inc
 		}
 		if d.Certs != nil {
-			ecarts, notes := ControleCertificats(ctx, d.Certs, a, ips[a.Stage], now)
+			ecarts, notes, inc := ControleCertificats(ctx, d.Certs, a, ips[a.Stage], now)
 			x.ajout(a.Name, ecarts, notes)
+			n += inc
 		}
 		if ctx.Err() != nil {
-			return r, fusion(next, curseurs), fmt.Errorf("audit coupé pendant les DNS et certificats : %w", ctx.Err())
+			r.Notes = append(r.Notes, a.Name+" : audit coupé pendant ses DNS et certificats")
+			return r, fusion(next, curseurs), fmt.Errorf("audit coupé pendant les DNS et certificats de %s : %w", a.Name, ctx.Err())
 		}
+		incertains += n
 		r.Ecarts = append(r.Ecarts, x.Ecarts...)
 		r.Notes = append(r.Notes, x.Notes...)
 	}
@@ -92,15 +99,21 @@ func Audit(ctx context.Context, cfg Config, d Deps, curseurs map[string]time.Tim
 	case cfg.Provision == nil:
 		r.Notes = append(r.Notes, "WAF_OPS_PROVISION absente : plan de provision non contrôlé")
 	case d.Provision != nil:
-		ecarts, notes := ControlePlan(ctx, d.Provision, *cfg.Provision, cfg.CoolifyURL, cfg.CoolifyToken, inv, cfg.Stages)
+		ecarts, notes, inc := ControlePlan(ctx, d.Provision, *cfg.Provision, cfg.CoolifyURL, cfg.CoolifyToken, inv, cfg.Stages)
 		if ctx.Err() != nil {
 			return r, fusion(next, curseurs), fmt.Errorf("audit coupé pendant le plan de provision : %w", ctx.Err())
 		}
 		r.Ecarts = append(r.Ecarts, ecarts...)
 		r.Notes = append(r.Notes, notes...)
+		incertains += inc
 	}
 	if garder {
 		next = fusion(next, curseurs)
+	}
+	// Un contrôle resté sans réponse n'est pas un constat : l'audit en échec est
+	// relancé sans attendre sa période, avec ses écarts dans le pulse d'ici là.
+	if incertains > 0 {
+		return r, next, fmt.Errorf("%d contrôle(s) sans réponse, audit relancé dans %s", incertains, relanceTache)
 	}
 	return r, next, nil
 }
@@ -124,7 +137,7 @@ func fusion(next, avant map[string]time.Time) map[string]time.Time {
 	return out
 }
 
-func auditApp(ctx context.Context, d Deps, a inventory.App, app, region string, team map[string]coolify.SharedEnv, avant time.Time, suivi bool, now time.Time, next map[string]time.Time, r *Rapport) {
+func auditApp(ctx context.Context, d Deps, a inventory.App, app, region string, team map[string]coolify.SharedEnv, avant time.Time, suivi bool, now time.Time, next map[string]time.Time, r *Rapport) (incertains int) {
 	key := region + "/" + app
 	where := app + " (" + region + ")"
 	depuis := avant
@@ -139,6 +152,9 @@ func auditApp(ctx context.Context, d Deps, a inventory.App, app, region string, 
 		}
 		r.ecart(a.Name, "Activity de %s : %s", where, fgpProblem(err))
 		r.Notes = append(r.Notes, fmt.Sprintf("%s : détail : %v", a.Name, err))
+		if errors.Is(err, ErrFGPInjoignable) {
+			incertains++
+		}
 	} else {
 		next[key] = depuis
 		autres := 0
@@ -170,7 +186,7 @@ func auditApp(ctx context.Context, d Deps, a inventory.App, app, region string, 
 	}
 	if !verrouillee(a, team) {
 		r.Notes = append(r.Notes, a.Name+" : sans LOCK_"+a.EnvSuffix()+", origine non sondée")
-		return
+		return incertains
 	}
 	var hosts []string
 	// En upstream, le host du visiteur n'est pas rattaché à l'app Scalingo :
@@ -178,6 +194,7 @@ func auditApp(ctx context.Context, d Deps, a inventory.App, app, region string, 
 	if a.HostHeader == "visitor" {
 		hosts = a.Hosts
 	}
-	ecarts, notes := d.Origine.Sonder(ctx, app, region, hosts)
+	ecarts, notes, inc := d.Origine.Sonder(ctx, app, region, hosts)
 	r.ajout(a.Name, ecarts, notes)
+	return incertains + inc
 }

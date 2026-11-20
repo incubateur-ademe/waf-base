@@ -37,7 +37,7 @@ WAF_OPS_STAGES (prod, preprod, ou les deux séparés par une virgule),
 WAF_OPS_FGP ({"url", "api": {"<région>": "<blob>"}}), WAF_OPS_FGP_KEY,
 WAF_OPS_PULSE_URL (boucle), WAF_OPS_INVENTAIRE (inventaire de main),
 WAF_OPS_PROVISION ({"project", "environment", "github_app", "base_ref", "vms":
-{"<vm>": {"server", "destination"}}}, facultative),
+{"<vm>": {"server", "destination", "base_ref"}}}, facultative),
 WAF_OPS_ETC (/etc/waf), WAF_OPS_STATE (/var/lib/waf-ops).`
 
 var nowFunc = time.Now
