@@ -468,3 +468,20 @@ func TestDemandeEcriture(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotidienABlanc(t *testing.T) {
+	s := nouveauScenario(t)
+	ecarts, notes, err := Quotidien(context.Background(), s.cfg, vmsTest, []App{appPilot}, Deps{Lecteur: s.lec, Now: func() time.Time { return maintenant }, copieur: s.cop, ABlanc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appels := s.f.liste(); len(appels) != 0 {
+		t.Fatalf("poussée à blanc envoyée : %v", appels)
+	}
+	if len(ecarts) != 0 || !contient(notes, "waf-pilote : "+hostPilote+" : à blanc, certificat de preprod à pousser sur waf-pilote (osc-fr1), expire le 2027-02-08") {
+		t.Fatalf("écarts %q notes %q", ecarts, notes)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.State, "acme", "preprod")); err != nil {
+		t.Fatalf("copie d'acme.json non faite à blanc : %v", err)
+	}
+}

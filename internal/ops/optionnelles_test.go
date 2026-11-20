@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -125,24 +126,22 @@ func TestOptionnellesIncompletes(t *testing.T) {
 		}
 	}
 	ts, absentes := Taches(cfg, Deps{})
-	if len(ts) != 4 || len(absentes) != 0 {
-		t.Fatalf("tâches en erreur de config non lancées : %d %v", len(ts), absentes)
-	}
-	for _, x := range ts[1:] {
-		_, _, err := x.Run(context.Background(), nil)
-		if err == nil || !strings.HasPrefix(err.Error(), "configuration : ") {
-			t.Fatalf("%s : %v", x.Nom, err)
-		}
+	if len(ts) != 1 || len(absentes) != 0 {
+		t.Fatalf("tâche à la config invalide lancée : %d %v", len(ts), absentes)
 	}
 
-	// Dans la boucle : le pulse le dit, le contrôle continue.
+	// Dans la boucle : chaque pulse le dit, pas seulement à l'échéance de la
+	// tâche, et le contrôle continue.
 	d, _ := pilotDeps(t, ipPP+"/32")
 	cfg.Inventaire, cfg.Etc, cfg.State = testCfg(t).Inventaire, "../..", t.TempDir()
 	p := &fakePulse{}
-	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(string, ...any) {}, Taches: ts[1:]}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(string, ...any) {}}
 	o.Passage(context.Background())
-	if !strings.Contains(p.bodies[0], "certificats en échec : configuration : variables manquantes : "+certs.EnvKnownHosts) {
-		t.Fatalf("pulse : %v", p.bodies)
+	o.Passage(context.Background())
+	for _, b := range p.bodies {
+		if !strings.Contains(b, "certificats : configuration : variables manquantes : "+certs.EnvKnownHosts) || !strings.Contains(b, "github : configuration") || !strings.Contains(b, "cloudflare : configuration") {
+			t.Fatalf("pulse : %v", p.bodies)
+		}
 	}
 }
 
@@ -159,15 +158,17 @@ func TestCopieCertificats(t *testing.T) {
 	d.Domaines = fakeDomaines{}
 	var vms []certs.VM
 	var apps []certs.App
+	var aBlanc []bool
 	certsQuotidien = func(_ context.Context, c certs.Config, v []certs.VM, a []certs.App, deps certs.Deps) ([]string, []string, error) {
 		vms, apps = v, a
+		aBlanc = append(aBlanc, deps.ABlanc)
 		if deps.Lecteur == nil || deps.Now == nil {
 			t.Fatal("lecteur ou horloge non transmis")
 		}
 		return []string{"waf-pilote : certificat de waf-pilote.incubateur.ademe.dev à moins de 21 jours"}, []string{"vm preprod : copie gardée"}, nil
 	}
 	t.Cleanup(func() { certsQuotidien = certs.Quotidien })
-	r, err := CopieCertificats(context.Background(), cfg, d)
+	r, err := CopieCertificats(context.Background(), cfg, d, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,20 +186,23 @@ func TestCopieCertificats(t *testing.T) {
 	// UPSTREAM absente : l'app n'est pas passée, la note le dit, sans écart.
 	d.Coolify = fakeTeam{envs: []coolify.SharedEnv{shared(t, "LOCK_WAF_PILOTE", "x", false)}}
 	apps = nil
-	r, _ = CopieCertificats(context.Background(), cfg, d)
+	r, _ = CopieCertificats(context.Background(), cfg, d, false)
 	if len(apps) != 0 || len(r.Ecarts) != 1 || !strings.Contains(strings.Join(r.Notes, "\n"), "UPSTREAM_WAF_PILOTE absente") {
 		t.Fatalf("cible illisible : %v %+v", apps, r)
 	}
 
 	d.Domaines = nil
-	if _, err := CopieCertificats(context.Background(), cfg, d); err == nil {
+	if fmt.Sprint(aBlanc) != "[true false]" {
+		t.Fatalf("à blanc non transmis : %v", aBlanc)
+	}
+	if _, err := CopieCertificats(context.Background(), cfg, d, true); err == nil {
 		t.Fatal("copie lancée sans lecteur de domaines")
 	}
 	certsQuotidien = func(context.Context, certs.Config, []certs.VM, []certs.App, certs.Deps) ([]string, []string, error) {
 		return nil, nil, context.Canceled
 	}
 	d.Domaines = fakeDomaines{}
-	if _, err := CopieCertificats(context.Background(), cfg, d); !errors.Is(err, context.Canceled) {
+	if _, err := CopieCertificats(context.Background(), cfg, d, true); !errors.Is(err, context.Canceled) {
 		t.Fatalf("erreur de Quotidien perdue : %v", err)
 	}
 }
@@ -236,7 +240,7 @@ func TestAuditsGitHubCloudflare(t *testing.T) {
 	}
 	t.Cleanup(func() { cfAudit = cloudflare.Audit })
 	r, err = Cloudflare(context.Background(), cfg, d)
-	if err == nil || strings.Join(apps, ",") != "koyo,waf-pilote" || len(all) != 4 || team == 0 || len(r.Notes) == 0 {
+	if err == nil || strings.Join(apps, ",") != "brouillon,koyo,waf-pilote" || len(all) != 4 || team == 0 || len(r.Notes) == 0 {
 		t.Fatalf("cloudflare : %v apps=%v all=%v team=%d %+v", err, apps, all, team, r)
 	}
 	d.Cloudflare = nil
@@ -277,5 +281,131 @@ func TestMainGitHubSansConfig(t *testing.T) {
 	e[ghaudit.EnvAppID] = "Iv23liTEST"
 	if err := Main(context.Background(), []string{"github"}, env(e), &out, &errw); err == nil || !strings.Contains(err.Error(), "github : configuration : variables manquantes") {
 		t.Fatalf("github incomplet : %v", err)
+	}
+}
+
+func TestCertificatsABlancParDefaut(t *testing.T) {
+	e := envOptionnel(t)
+	cfg, err := LoadConfig(env(e), ModeBoucle)
+	if err != nil || cfg.Opt.CertsPoussee {
+		t.Fatalf("poussée sans %s : %v %v", EnvCertsPoussee, cfg.Opt.CertsPoussee, err)
+	}
+	var vus []bool
+	certsQuotidien = func(_ context.Context, _ certs.Config, _ []certs.VM, _ []certs.App, deps certs.Deps) ([]string, []string, error) {
+		vus = append(vus, deps.ABlanc)
+		return nil, nil, nil
+	}
+	t.Cleanup(func() { certsQuotidien = certs.Quotidien })
+	d, _ := pilotDeps(t, ipPP+"/32")
+	d.Domaines = fakeDomaines{}
+	tc := testCfg(t)
+	cfg.Inventaire, cfg.Etc, cfg.State = tc.Inventaire, "../..", tc.State
+	run := func(cfg Config) {
+		ts, _ := Taches(cfg, d)
+		for _, x := range ts {
+			if x.Nom == TacheCertificats {
+				if _, _, err := x.Run(context.Background(), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	run(cfg)
+	e[EnvCertsPoussee] = "oui"
+	cfg2, _ := LoadConfig(env(e), ModeBoucle)
+	cfg2.Inventaire, cfg2.Etc, cfg2.State = tc.Inventaire, "../..", tc.State
+	run(cfg2)
+	if fmt.Sprint(vus) != "[true false]" {
+		t.Fatalf("à blanc : %v (à blanc par défaut, poussée avec %s=oui)", vus, EnvCertsPoussee)
+	}
+
+	// La commande à la demande est toujours à blanc.
+	vus = nil
+	var out, errw bytes.Buffer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `[{"id":1,"key":"UPSTREAM_WAF_PILOTE","value":"https://waf-pilote.osc-fr1.scalingo.io"}]`)
+	}))
+	defer srv.Close()
+	e["COOLIFY_URL"], e["WAF_OPS_INVENTAIRE"], e["WAF_OPS_ETC"], e["WAF_OPS_STATE"] = srv.URL, tc.Inventaire, "../..", tc.State
+	if err := Main(context.Background(), []string{"certificats"}, env(e), &out, &errw); err != nil {
+		t.Fatalf("%v\n%s", err, errw.String())
+	}
+	if fmt.Sprint(vus) != "[true]" {
+		t.Fatalf("commande certificats : %v\n%s%s", vus, out.String(), errw.String())
+	}
+}
+
+func TestRelanceSurEcart(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	tache := Tache{Periode: 24 * time.Hour, RelanceSurEcart: time.Hour}
+	if tache.due(EtatTache{A: now.Add(-30 * time.Minute), Ecarts: []string{"x"}}, true, now) {
+		t.Fatal("relance avant une heure")
+	}
+	if !tache.due(EtatTache{A: now.Add(-61 * time.Minute), Ecarts: []string{"x"}}, true, now) {
+		t.Fatal("écart gardé un jour sans relance")
+	}
+	if tache.due(EtatTache{A: now.Add(-2 * time.Hour), Ecarts: []string{}}, true, now) {
+		t.Fatal("relance sans écart")
+	}
+}
+
+func TestTacheCoupeeSansErreur(t *testing.T) {
+	cfg := testCfg(t)
+	cfg.Opt.GitHub = &ghaudit.Config{AppID: "x"}
+	ghAudit = func(ctx context.Context, _ ghaudit.Config, _ []inventory.App) ([]string, []string, error) {
+		<-ctx.Done()
+		return []string{"incubateur-ademe/waf-pilote : audit GitHub incomplet"}, nil, nil
+	}
+	t.Cleanup(func() { ghAudit = ghaudit.Audit })
+	d, _ := pilotDeps(t, ipPP+"/32")
+	ts, _ := Taches(cfg, d)
+	var gh Tache
+	for _, x := range ts {
+		if x.Nom == TacheGitHub {
+			gh = x
+		}
+	}
+	gh.Delai = 20 * time.Millisecond
+	p := &fakePulse{}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(string, ...any) {}, Taches: []Tache{gh}}
+	o.Passage(context.Background())
+	if !strings.Contains(p.bodies[0], "github en échec : délai de 20ms dépassé") {
+		t.Fatalf("tâche coupée rendue sans erreur : %v", p.bodies)
+	}
+}
+
+func TestSortiesNettoyees(t *testing.T) {
+	cfg := testCfg(t)
+	d, _ := pilotDeps(t, ipPP+"/32")
+	var logs []string
+	tache := Tache{Nom: "github", Periode: time.Hour, Delai: time.Minute, Run: func(context.Context, map[string]time.Time) (Rapport, map[string]time.Time, error) {
+		return Rapport{Ecarts: []string{"x\nwafgen ops: github : 0 app(s), 0 écart(s)"}, Notes: []string{"n\u2028forgée"}}, nil, errors.New("e\rforgée")
+	}}
+	p := &fakePulse{}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, Taches: []Tache{tache}}
+	o.Passage(context.Background())
+	for _, l := range append(logs, p.bodies...) {
+		if strings.ContainsAny(l, "\n\r\u2028") {
+			t.Fatalf("ligne forgée : %q", l)
+		}
+	}
+	e, _ := LireEtat(cfg.State)
+	if strings.ContainsAny(strings.Join(e.Taches["github"].Ecarts, "")+strings.Join(e.Taches["github"].Notes, "")+e.Taches["github"].Erreur, "\n\r\u2028") {
+		t.Fatalf("état : %+v", e.Taches["github"])
+	}
+}
+
+func TestControleNettoye(t *testing.T) {
+	cfg := testCfg(t)
+	d, s := pilotDeps(t, ipPP+"/32")
+	s.err["waf-pilote"] = fmt.Errorf("%w : GET /v1/apps/waf-pilote/firewall_rules : x\nwafgen ops: contrôle : 0 app(s), 0 écart(s)", ErrFGPInjoignable)
+	var logs []string
+	p := &fakePulse{}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
+	o.Passage(context.Background())
+	for _, l := range append(logs, p.bodies...) {
+		if strings.ContainsAny(l, "\n\r") {
+			t.Fatalf("ligne forgée par le contrôle : %q", l)
+		}
 	}
 }

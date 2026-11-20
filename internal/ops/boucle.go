@@ -151,8 +151,11 @@ func LireEtat(dir string) (Etat, error) {
 type Tache struct {
 	Nom     string
 	Periode time.Duration
-	Delai   time.Duration
-	Run     func(ctx context.Context, curseurs map[string]time.Time) (Rapport, map[string]time.Time, error)
+	// RelanceSurEcart, non nul et plus court que Periode : un passage qui a
+	// rendu des écarts est relancé à ce délai.
+	RelanceSurEcart time.Duration
+	Delai           time.Duration
+	Run             func(ctx context.Context, curseurs map[string]time.Time) (Rapport, map[string]time.Time, error)
 }
 
 // Une tâche en échec est relancée sans attendre sa période.
@@ -163,6 +166,9 @@ func (t Tache) due(e EtatTache, ok bool, now time.Time) bool {
 		return true
 	}
 	p := t.Periode
+	if len(e.Ecarts) > 0 && t.RelanceSurEcart > 0 && t.RelanceSurEcart < p {
+		p = t.RelanceSurEcart
+	}
 	if e.Erreur != "" && relanceTache < p {
 		p = relanceTache
 	}
@@ -206,6 +212,21 @@ func nonNil(l []string) []string {
 	return l
 }
 
+// Borne d'une ligne venue d'une tâche, écart, note ou erreur.
+const maxSortie = 1000
+
+// nettoyer borne chaque ligne d'un rapport et retire ses caractères de
+// contrôle : une erreur réseau peut citer un nom servi par un tiers, et un
+// retour à la ligne y forgerait une entrée de log ou un pulse.
+func nettoyer(r *Rapport) {
+	for i, x := range r.Ecarts {
+		r.Ecarts[i] = propre(x, maxSortie)
+	}
+	for i, x := range r.Notes {
+		r.Notes[i] = propre(x, maxSortie)
+	}
+}
+
 // Runner tient l'état de la boucle entre deux passages.
 type Runner struct {
 	Cfg    Config
@@ -247,6 +268,10 @@ func (o *Runner) Passage(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, runTimeout)
 	r, err := Controle(rctx, o.Cfg, o.Deps)
 	cancel()
+	nettoyer(&r)
+	if err != nil {
+		err = errors.New(propre(err.Error(), maxSortie))
+	}
 	if ctx.Err() != nil {
 		logf("arrêt pendant le contrôle : passage abandonné, ni pulse ni état")
 		return
@@ -272,6 +297,10 @@ func (o *Runner) Passage(ctx context.Context) {
 		if terr != nil && tctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			terr = fmt.Errorf("délai de %s dépassé : %v", t.Delai, terr)
 		}
+		nettoyer(&tr)
+		if terr != nil {
+			terr = errors.New(propre(terr.Error(), maxSortie))
+		}
 		tcancel()
 		if ctx.Err() != nil {
 			logf("arrêt pendant %s : passage abandonné, ni pulse ni état", t.Nom)
@@ -287,7 +316,7 @@ func (o *Runner) Passage(ctx context.Context) {
 		taches[t.Nom] = e
 		faits = append(faits, fait{t.Nom, tr, terr})
 	}
-	raisons := raisonsTaches(o.Taches, taches)
+	raisons := append(raisonsTaches(o.Taches, taches), erreursConfig(o.Cfg.Opt)...)
 	if o.alerte != "" && o.Deps.Now().Before(o.alerteJusqua) {
 		raisons = append(raisons, o.alerte)
 	}

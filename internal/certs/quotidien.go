@@ -33,6 +33,9 @@ type App struct {
 type Deps struct {
 	Lecteur Lecteur
 	Now     func() time.Time
+	// ABlanc : rien n'est poussé sur Scalingo, chaque poussée prévue sort en
+	// note. Les copies d'acme.json se font quand même.
+	ABlanc bool
 
 	copieur  copieur
 	ecrivain ecrivain
@@ -91,6 +94,9 @@ func Quotidien(ctx context.Context, cfg Config, vms []VM, apps []App, d Deps) (e
 	}
 	if ec == nil {
 		ec = fgpEcrivain{cfg: cfg}
+	}
+	if d.ABlanc {
+		ec = blancEcrivain{}
 	}
 	vms = append([]VM(nil), vms...)
 	sort.Slice(vms, func(i, j int) bool { return vms[i].Name < vms[j].Name })
@@ -226,6 +232,10 @@ func pousserDomaine(ctx context.Context, ec ecrivain, now time.Time, a App, wher
 		return
 	}
 	res, err := ec.poser(ctx, a.Region, a.Scalingo, dm.ID, best.chaine, best.cle)
+	if errors.Is(err, errABlanc) {
+		p.note(a.Name, "%s : à blanc, certificat de %s à pousser sur %s, expire le %s", host, best.VM, where, jour(fin))
+		return
+	}
 	if err != nil {
 		p.ecart(a.Name, "certificat de %s non poussé sur %s : %s", host, where, probleme(err))
 		p.note(a.Name, "%s : détail : %v", host, err)

@@ -15,12 +15,13 @@ import (
 	"github.com/incubateur-ademe/waf-base/internal/coolify"
 )
 
-const Usage = `wafgen ops [controle | audit | github | cloudflare | fgp-scopes]
+const Usage = `wafgen ops [controle | audit | certificats | github | cloudflare | fgp-scopes]
 
   (sans argument)  boucle : contrôle toutes les 5 minutes, audit toutes les heures, pulse updown,
                    état dans WAF_OPS_STATE
   controle         un contrôle : notes et écarts sur la sortie, code 1 s'il y a un écart ; pas de pulse
   audit            un audit depuis les curseurs de l'état, sans les avancer ni écrire l'état ; pas de pulse
+  certificats      copie d'acme.json et poussées prévues, à blanc : rien n'est poussé ; pas de pulse
   github           un audit GitHub, en lecture ; pas de pulse
   cloudflare       un audit Cloudflare, en lecture ; pas de pulse
   fgp-scopes       demandes de blobs d'API de lecture, une par région, au format de /api/generate de FGP
@@ -40,10 +41,10 @@ suivant.
 Tâches facultatives, lancées si leurs variables sont posées : copie
 quotidienne d'acme.json et poussée des certificats sur Scalingo
 (WAF_OPS_ACME_SSH_KEY, WAF_OPS_ACME_KNOWN_HOSTS, WAF_OPS_ACME_VMS,
-WAF_OPS_FGP_ECRITURE) ; audit GitHub horaire (WAF_OPS_GITHUB_APP_ID,
-WAF_OPS_GITHUB_APP_KEY) ; audit Cloudflare horaire (CLOUDFLARE_API_TOKEN). Une
-config incomplète met la tâche en échec à chaque passage, sans arrêter les
-autres.
+WAF_OPS_FGP_ECRITURE ; à blanc tant que WAF_OPS_CERTS_POUSSEE ne vaut pas
+« oui ») ; audit GitHub horaire (WAF_OPS_GITHUB_APP_ID, WAF_OPS_GITHUB_APP_KEY) ;
+audit Cloudflare horaire (CLOUDFLARE_API_TOKEN). Une config incomplète n'est
+pas lancée et chaque pulse le dit, sans arrêter les autres contrôles.
 
 Environnement : COOLIFY_URL, COOLIFY_TOKEN (read:sensitive, pour UPSTREAM_<APP>),
 WAF_OPS_STAGES (prod, preprod, ou les deux séparés par une virgule),
@@ -74,7 +75,7 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 	mode := ModeBoucle
 	switch cmd {
 	case "":
-	case "controle", "audit", "github", "cloudflare":
+	case "controle", "audit", "certificats", "github", "cloudflare":
 		mode = ModeControle
 	case "fgp-scopes":
 		mode = ModeScopes
@@ -109,13 +110,16 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 	if mode == ModeControle {
 		var r Rapport
 		switch cmd {
-		case TacheGitHub, TacheCloudflare:
+		case TacheCertificats, TacheGitHub, TacheCloudflare:
 			if msg, ko := cfg.Opt.Erreurs[cmd]; ko {
 				return fmt.Errorf("%s : configuration : %s", cmd, msg)
 			}
-			if cmd == TacheGitHub {
+			switch cmd {
+			case TacheCertificats:
+				r, err = CopieCertificats(ctx, cfg, d, true)
+			case TacheGitHub:
 				r, err = GitHub(ctx, cfg, d)
-			} else {
+			default:
 				r, err = Cloudflare(ctx, cfg, d)
 			}
 		case "audit":
