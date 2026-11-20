@@ -146,7 +146,8 @@ func LireEtat(dir string) (Etat, error) {
 // boucle quand sa période est écoulée. Ses écarts restent dans le pulse jusqu'à
 // son passage suivant : un écart corrigé entre deux passages donne une alerte
 // DOWN, puis UP au passage suivant. Run reçoit les curseurs gardés de son
-// passage précédent et rend ceux à garder.
+// passage précédent et rend ceux à garder, même en erreur ; nil les laisse
+// tels quels.
 type Tache struct {
 	Nom     string
 	Periode time.Duration
@@ -213,6 +214,10 @@ type Runner struct {
 	Logf   func(string, ...any)
 	Taches []Tache
 	etat   *Etat
+	// Un état illisible au démarrage a fait perdre les curseurs : l'alerte
+	// reste dans le pulse pendant une période d'audit.
+	alerte       string
+	alerteJusqua time.Time
 }
 
 func (o *Runner) charger() {
@@ -221,7 +226,14 @@ func (o *Runner) charger() {
 	}
 	e, err := LireEtat(o.Cfg.State)
 	if err != nil {
-		o.Logf("état illisible, repris à vide : %v", err)
+		now := o.Deps.Now().UTC()
+		garde := fmt.Sprintf("%s.illisible-%s", etatFile, now.Format("20060102T150405Z"))
+		if rerr := os.Rename(filepath.Join(o.Cfg.State, etatFile), filepath.Join(o.Cfg.State, garde)); rerr != nil {
+			garde = "non gardé"
+		}
+		o.alerte = fmt.Sprintf("état illisible au démarrage (%s), curseurs d'Activity perdus : Activity relue sur %s seulement", garde, activiteSansCurseur)
+		o.alerteJusqua = now.Add(PeriodeAudit)
+		o.Logf("état illisible, repris à vide : %v ; fichier %s", err, garde)
 	}
 	o.etat = &e
 }
@@ -266,14 +278,20 @@ func (o *Runner) Passage(ctx context.Context) {
 			return
 		}
 		e := EtatTache{A: now.UTC(), Apps: tr.Apps, Ecarts: nonNil(tr.Ecarts), Notes: nonNil(tr.Notes), Curseurs: cur}
+		if cur == nil {
+			e.Curseurs = prev.Curseurs
+		}
 		if terr != nil {
 			e.Erreur = terr.Error()
-			e.Curseurs = prev.Curseurs
 		}
 		taches[t.Nom] = e
 		faits = append(faits, fait{t.Nom, tr, terr})
 	}
-	body := PulseBody(r, err, raisonsTaches(o.Taches, taches)...)
+	raisons := raisonsTaches(o.Taches, taches)
+	if o.alerte != "" && o.Deps.Now().Before(o.alerteJusqua) {
+		raisons = append(raisons, o.alerte)
+	}
+	body := PulseBody(r, err, raisons...)
 	for _, n := range r.Notes {
 		logf("note : %s", n)
 	}
@@ -295,6 +313,16 @@ func (o *Runner) Passage(ctx context.Context) {
 			logf("%s en échec : %v", f.nom, f.err)
 		}
 		logf("%s : %d app(s), %d écart(s)", f.nom, f.r.Apps, len(f.r.Ecarts))
+	}
+	ran := map[string]bool{}
+	for _, f := range faits {
+		ran[f.nom] = true
+	}
+	for _, t := range o.Taches {
+		e, ok := taches[t.Nom]
+		if ok && !ran[t.Nom] && (len(e.Ecarts) > 0 || e.Erreur != "") {
+			logf("%s du %s : %d écart(s)%s gardé(s) dans le pulse jusqu'au passage suivant", t.Nom, e.A.UTC().Format(time.RFC3339), len(e.Ecarts), map[bool]string{true: " et une erreur", false: ""}[e.Erreur != ""])
+		}
 	}
 	pulse := "non envoyé"
 	if perr := o.Pulse.Send(ctx, body); perr != nil {

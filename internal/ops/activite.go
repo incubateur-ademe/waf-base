@@ -11,7 +11,7 @@ import (
 
 const (
 	// Pages d'Activity lues au plus par app et par audit, de 100 événements.
-	maxEventPages = 5
+	maxEventPages = 20
 	// Sans curseur (premier audit, état perdu), l'audit relit ce passé.
 	activiteSansCurseur = 2 * time.Hour
 	maxDetail           = 120

@@ -57,6 +57,16 @@ func (s Sonde) client(routeur string) *http.Client {
 	if s.TLS != nil {
 		tc = s.TLS.Clone()
 	}
+	if routeur != "" {
+		// À l'IP du routeur, le certificat est celui que Scalingo garde pour le
+		// host, poussé à la main ou par waf-ops : son échéance n'est pas l'objet
+		// de la sonde. Rien de sensible n'est envoyé, seule la signature du 403
+		// compte.
+		if tc == nil {
+			tc = &tls.Config{}
+		}
+		tc.InsecureSkipVerify = true
+	}
 	return &http.Client{
 		Timeout: sondeTimeout,
 		Transport: &http.Transport{

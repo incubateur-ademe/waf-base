@@ -66,7 +66,7 @@ func TestFGPEvents(t *testing.T) {
 	full := func(page int) string {
 		var l []string
 		for i := 0; i < 100; i++ {
-			l = append(l, ev(fmt.Sprintf("p%d-%d", page, i), "deployment", t0.Add(time.Duration(1000-page*100-i)*time.Minute), `{}`))
+			l = append(l, ev(fmt.Sprintf("p%d-%d", page, i), "deployment", t0.Add(time.Duration(3000-page*100-i)*time.Minute), `{}`))
 		}
 		return `{"events":[` + strings.Join(l, ",") + `],"meta":{"pagination":{"next_page":` + fmt.Sprint(page+1) + `}}}`
 	}
@@ -93,7 +93,7 @@ func TestFGPEvents(t *testing.T) {
 
 func TestEventsRoute(t *testing.T) {
 	c := fgpServer(t, func(w http.ResponseWriter, r *http.Request) { t.Fatalf("appel inattendu : %s", r.URL) })
-	for _, p := range []string{"/v1/apps/x/events", "/v1/apps/x/events?page=1&per_page=100&x=1", "/v1/apps/x/events?page=10&per_page=100", "/v1/apps/x/variables?page=1&per_page=100"} {
+	for _, p := range []string{"/v1/apps/x/events", "/v1/apps/x/events?page=1&per_page=100&x=1", "/v1/apps/x/events?page=21&per_page=100", "/v1/apps/x/events?page=0&per_page=100", "/v1/apps/x/variables?page=1&per_page=100"} {
 		if err := c.get(context.Background(), "osc-fr1", p, &struct{}{}); err == nil || !strings.Contains(err.Error(), "hors de la liste") {
 			t.Fatalf("%s : %v", p, err)
 		}
@@ -193,9 +193,18 @@ func TestAudit(t *testing.T) {
 	if err != nil || len(r.Ecarts) != 2 || !strings.Contains(r.Ecarts[0], "Activity de waf-pilote (osc-fr1) : FGP refuse") || !strings.Contains(r.Ecarts[1], "HTTP 200") {
 		t.Fatalf("écarts : %v %v", r.Ecarts, err)
 	}
-	if !cur3["osc-fr1/waf-pilote"].Equal(old["osc-fr1/waf-pilote"]) || len(cur3) != 2 {
-		t.Fatalf("curseurs : %v (waf-pilote inchangé, recente gardé, partie oublié)", cur3)
+	if !cur3["osc-fr1/waf-pilote"].Equal(old["osc-fr1/waf-pilote"]) || len(cur3) != 1 {
+		t.Fatalf("curseurs : %v (waf-pilote inchangé, apps hors périmètre oubliées)", cur3)
 	}
+
+	// Cible illisible : tous les curseurs restent, même vieux d'un mois.
+	team := d.Coolify
+	d.Coolify = fakeTeam{envs: []coolify.SharedEnv{shared(t, "LOCK_WAF_PILOTE", "x", false)}}
+	r, cur4, err := Audit(context.Background(), cfg, d, old)
+	if err != nil || len(cur4) != 3 || len(r.Ecarts) != 0 || !strings.Contains(strings.Join(r.Notes, "\n"), "UPSTREAM_WAF_PILOTE absente") {
+		t.Fatalf("cible illisible : %v %v %v (l'écart d'UPSTREAM est porté par le contrôle, ici une note)", cur4, r.Ecarts, err)
+	}
+	d.Coolify = team
 
 	// Sans verrou : pas de sonde.
 	d.Coolify = fakeTeam{envs: []coolify.SharedEnv{shared(t, "UPSTREAM_WAF_PILOTE", "https://waf-pilote.osc-fr1.scalingo.io", false)}}
@@ -287,14 +296,18 @@ func TestSonde(t *testing.T) {
 		t.Fatalf("routeur introuvable : %v", ecarts)
 	}
 
-	// Sans réglage de test, le certificat est vérifié.
+	// Sans réglage de test, le certificat de *.scalingo.io est vérifié ; à
+	// l'IP du routeur, seule la signature du 403 compte.
 	if c := (Sonde{}).client(""); c.Transport.(*http.Transport).TLSClientConfig != nil {
 		t.Fatal("la sonde de production ne vérifie pas le certificat")
 	}
+	if c := (Sonde{}).client("192.0.2.10"); !c.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("sonde à l'IP du routeur dépendante du certificat Scalingo")
+	}
 	s.TLS = nil
-	ecarts, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", nil)
-	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "certificat refusé") {
-		t.Fatalf("certificat de test accepté sans réglage : %v", ecarts)
+	ecarts, _ = s.Sonder(context.Background(), "waf-pilote", "osc-fr1", []string{"waf-pilote.incubateur.ademe.dev"})
+	if len(ecarts) != 2 || !strings.Contains(ecarts[0], "certificat refusé") || !strings.Contains(ecarts[1], "certificat refusé") {
+		t.Fatalf("certificat de test accepté sans réglage, ou refusé à l'IP du routeur : %v", ecarts)
 	}
 }
 
@@ -317,7 +330,10 @@ func TestRunnerTaches(t *testing.T) {
 	tache := Tache{Nom: "audit", Periode: time.Hour, Delai: time.Minute, Run: func(ctx context.Context, c map[string]time.Time) (Rapport, map[string]time.Time, error) {
 		runs++
 		vus = append(vus, c)
-		return Rapport{Apps: 1, Ecarts: ecarts}, map[string]time.Time{"osc-fr1/waf-pilote": h.t}, terr
+		if terr != nil {
+			return Rapport{Apps: 1, Ecarts: ecarts}, nil, terr
+		}
+		return Rapport{Apps: 1, Ecarts: ecarts}, map[string]time.Time{"osc-fr1/waf-pilote": h.t}, nil
 	}}
 	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: logf, Taches: []Tache{tache}}
 
@@ -475,5 +491,128 @@ func TestTacheHorlogeReculee(t *testing.T) {
 	}
 	if tache.due(EtatTache{A: now.Add(-time.Minute)}, true, now) {
 		t.Fatal("tâche relancée avant sa période")
+	}
+}
+
+func TestAuditTronque(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	d, s := pilotDeps(t, ipPP+"/32")
+	d.Origine, d.Now = &fakeOrigine{}, func() time.Time { return now }
+	s.events = map[string][]Evenement{"waf-pilote": {
+		{Type: "deployment", A: now.Add(-time.Minute)},
+		{Type: "deployment", A: now.Add(-50 * time.Minute)},
+	}}
+	s.tronque = map[string]bool{"waf-pilote": true}
+	r, cur, err := Audit(context.Background(), testCfg(t), d, map[string]time.Time{"osc-fr1/waf-pilote": now.Add(-3 * time.Hour)})
+	if err != nil || len(r.Ecarts) != 1 || !strings.Contains(r.Ecarts[0], "plus de 2 événements, fenêtre du 2026-11-20T09:00:00Z au 2026-11-20T11:10:00Z non lue, à relire dans le dashboard Scalingo") {
+		t.Fatalf("troncature : %v %v", r.Ecarts, err)
+	}
+	if !cur["osc-fr1/waf-pilote"].Equal(now.Add(-time.Minute)) {
+		t.Fatalf("curseur : %v", cur)
+	}
+}
+
+type coupeOrigine struct{ cancel func() }
+
+func (c coupeOrigine) Sonder(context.Context, string, string, []string) ([]string, []string) {
+	c.cancel()
+	return []string{"origine : sans réponse : délai dépassé"}, nil
+}
+
+func TestAuditCoupe(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	d, s := pilotDeps(t, ipPP+"/32")
+	d.Now = func() time.Time { return now }
+	s.events = map[string][]Evenement{"waf-pilote": {{Type: "new_domain", A: now.Add(-time.Minute), Detail: "x.example.org"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.Origine = coupeOrigine{cancel: cancel}
+	old := map[string]time.Time{"osc-fr1/waf-pilote": now.Add(-time.Hour), "osc-fr1/autre": now.Add(-time.Hour)}
+	r, cur, err := Audit(ctx, testCfg(t), d, old)
+	if err == nil || !strings.Contains(err.Error(), "audit coupé après 0 app(s) sur 1") || !errors.Is(err, context.Canceled) {
+		t.Fatalf("erreur : %v", err)
+	}
+	if len(r.Ecarts) != 0 || r.Apps != 0 {
+		t.Fatalf("écarts d'une app coupée gardés : %+v", r)
+	}
+	if len(cur) != 2 || !cur["osc-fr1/waf-pilote"].Equal(old["osc-fr1/waf-pilote"]) {
+		t.Fatalf("curseurs : %v", cur)
+	}
+}
+
+func TestFGPContexteTermine(t *testing.T) {
+	c := fgpServer(t, func(w http.ResponseWriter, r *http.Request) { time.Sleep(50 * time.Millisecond) })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err := c.FirewallRules(ctx, "osc-fr1", "waf-pilote")
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrFGPInjoignable) {
+		t.Fatalf("contexte terminé rendu en FGP injoignable : %v", err)
+	}
+}
+
+func TestEtatIllisibleAlerte(t *testing.T) {
+	cfg := testCfg(t)
+	if err := os.MkdirAll(cfg.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.State, etatFile), []byte("{tronqué"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := pilotDeps(t, ipPP+"/32")
+	h := &horloge{t: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}
+	d.Now = h.now
+	p := &fakePulse{}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: p, Logf: func(string, ...any) {}}
+	o.Passage(context.Background())
+	if !strings.Contains(p.bodies[0], "waf-ops-ko: état illisible au démarrage (etat.json.illisible-20261120T120000Z)") {
+		t.Fatalf("pulse : %v", p.bodies)
+	}
+	if b, err := os.ReadFile(filepath.Join(cfg.State, "etat.json.illisible-20261120T120000Z")); err != nil || string(b) != "{tronqué" {
+		t.Fatalf("fichier illisible non gardé : %v", err)
+	}
+	h.t = h.t.Add(55 * time.Minute)
+	o.Passage(context.Background())
+	h.t = h.t.Add(5 * time.Minute)
+	o.Passage(context.Background())
+	if !strings.HasPrefix(p.bodies[1], "waf-ops-ko: état illisible") || p.bodies[2] != PulseOK {
+		t.Fatalf("alerte d'état : %v", p.bodies)
+	}
+}
+
+func TestLogsEcartsGardes(t *testing.T) {
+	cfg := testCfg(t)
+	d, _ := pilotDeps(t, ipPP+"/32")
+	h := &horloge{t: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}
+	d.Now = h.now
+	var logs []string
+	tache := Tache{Nom: "audit", Periode: time.Hour, Delai: time.Minute, Run: func(context.Context, map[string]time.Time) (Rapport, map[string]time.Time, error) {
+		return Rapport{Ecarts: []string{"x"}}, nil, nil
+	}}
+	o := &Runner{Cfg: cfg, Deps: d, Pulse: &fakePulse{}, Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }, Taches: []Tache{tache}}
+	o.Passage(context.Background())
+	n := len(logs)
+	h.t = h.t.Add(5 * time.Minute)
+	o.Passage(context.Background())
+	if !strings.Contains(strings.Join(logs[n:], "\n"), "audit du 2026-11-20T12:00:00Z : 1 écart(s) gardé(s) dans le pulse") {
+		t.Fatalf("logs : %v", logs[n:])
+	}
+}
+
+func TestAuditInventairePerime(t *testing.T) {
+	cfg := testCfg(t)
+	d, _ := pilotDeps(t, ipPP+"/32")
+	d.Origine = &fakeOrigine{}
+	if _, err := Controle(context.Background(), cfg, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cfg.Inventaire); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(filepath.Join(cfg.State, inventoryCache), old, old); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := Audit(context.Background(), cfg, d, nil)
+	if err != nil || len(r.Ecarts) != 0 || !strings.Contains(strings.Join(r.Notes, "\n"), "inventaire non rafraîchi depuis 24 h") {
+		t.Fatalf("écart d'inventaire doublé par l'audit : %v %v", r.Ecarts, err)
 	}
 }

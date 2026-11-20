@@ -92,6 +92,16 @@ func Main(ctx context.Context, args []string, getenv func(string) string, stdout
 			if lerr != nil {
 				return lerr
 			}
+			if last, ok := e.Taches["audit"]; ok {
+				fmt.Fprintf(stdout, "dernier audit de la boucle : %s, %d écart(s)\n", last.A.UTC().Format(time.RFC3339), len(last.Ecarts))
+				for _, x := range last.Ecarts {
+					fmt.Fprintf(stdout, "  écart gardé dans le pulse : %s\n", x)
+				}
+				if last.Erreur != "" {
+					fmt.Fprintf(stdout, "  erreur gardée dans le pulse : %s\n", last.Erreur)
+				}
+				fmt.Fprintln(stdout, "audit de maintenant :")
+			}
 			r, _, err = Audit(ctx, cfg, d, e.Taches["audit"].Curseurs)
 		} else {
 			r, err = Controle(ctx, cfg, d)
